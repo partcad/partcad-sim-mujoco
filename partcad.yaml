@@ -1,0 +1,140 @@
+# The MuJoCo simulation plugin for PartCAD.
+#
+# A simulation plugin is declared exactly as an export or a render
+# implementation is -- a `path` to a script, the sandbox that script needs, and
+# the parameters it is handed -- and the section it goes in is what says which
+# of the three it is. What differs is what it does with them: an export writes a
+# file, a render draws a picture, and a simulation *runs* the scene and reports
+# what happened.
+#
+# The contract is narrow on purpose:
+#
+#   in    a scene with the subject in it, as a file, in the format `format:`
+#         names -- PartCAD exports it before this script is started
+#   out   JSON carrying at least `before` and `after`
+#
+# What is inside `before` and `after`, and anything else beside them, is this
+# plugin's own vocabulary. PartCAD does not read it: it hands the two objects to
+# the `validation:` expression of the `simulate:` that asked for the run, and
+# reports what the expression says.
+#
+# This package used to ship inside the `partcad` wheel as `//builtin/simulate`.
+# It does not any more, and should not: PartCAD ships the *concept* -- the
+# section, the sandbox wrapper, the runner -- and a simulator is somebody's
+# program with a release cycle of its own. Nothing about it needs to be in a CAD
+# tool's wheel, and pinning MuJoCo there would have made every PartCAD release a
+# statement about which MuJoCo you get.
+
+name: //pub/feature/simulate/mujoco
+desc: Physics simulation of a PartCAD scene, run in MuJoCo.
+
+docs:
+  intro: |
+    Runs a PartCAD scene in [MuJoCo](https://mujoco.org/) under gravity and
+    reports where everything ended up, so that a part or an assembly can state
+    what it is supposed to do -- or not do -- and have that checked.
+
+    The scene is handed over as MJCF, MuJoCo's own model format, which PartCAD
+    writes (`pc export -t mjcf`): every body free to move, a ground plane under
+    it, and one body per shape the scene places. The model is then stepped for
+    `duration` seconds of simulated time.
+
+    `before` and `after` each carry `time` and a `bodies` object: one entry per
+    body, holding its position `pos` and its orientation `quat` (`w x y z`).
+    Positions are in **millimetres**, PartCAD's unit everywhere, not the metres
+    MuJoCo works in -- a validation expression is written by whoever wrote the
+    part, against the numbers that part is drawn in.
+
+    Nothing has to be installed by hand: PartCAD installs this package's Python
+    requirements into the sandbox it runs this implementation in, so a machine
+    with no MuJoCo on it simulates just the same.
+
+    ### Friction is a fact about the material, not about MuJoCo
+
+    Whether a stack of blocks stands up is not a property of its geometry. Two
+    20 mm blocks squarely stacked stay put at a sliding friction of 0.2 and
+    scatter at 0.0, and nothing about the arrangement changes in between.
+
+    So state it. A part that declares a `material:` whose material states `mu`
+    gets that coefficient written into the MJCF, and the simulation answers for
+    the material the part is actually made of. A part that states neither gets
+    MuJoCo's own default of 1.0 -- which is a plausible number for metal on
+    metal and a badly wrong one for PTFE, and, worse, is a number nobody chose.
+  usage: |
+    Import this package and name it from a `simulate:` section:
+
+    ```yaml
+    dependencies:
+      sim-mujoco:
+        type: git
+        url: https://github.com/partcad/partcad-sim-mujoco.git
+
+    assemblies:
+      stack:
+        type: assy
+        simulate:
+          stands:
+            simulation: sim-mujoco:mujoco
+            offset: [[0, 0, 10], [0, 0, 1], 0]
+            validation: |
+              max(
+                  abs(after["bodies"][name]["pos"][2] - before["bodies"][name]["pos"][2])
+                  for name in before["bodies"]
+              ) < 2.0
+    ```
+
+    ```shell
+    pc sim -a stack          # run it and check the validation
+    pc sim --json -a stack   # and print everything MuJoCo reported
+    ```
+
+    Any parameter below can be set per simulation without a plugin of its own:
+
+    ```yaml
+            params:
+              duration: 30.0
+              samples: 10
+    ```
+
+# What the sandbox this package's implementation runs in needs installed.
+#
+# MuJoCo and nothing else: the plugin is handed a file and reads it with
+# MuJoCo's own loader, so the sandbox needs no CAD stack at all.
+#
+# A range rather than an exact pin. PartCAD pins its own CAD packages because
+# two of them write the same OCP native module and disagreeing versions crash
+# the wrapper with no traceback; nothing here shares a native module with
+# anything, and the four calls this plugin makes -- `MjModel.from_xml_path`,
+# `MjData`, `mj_forward`, `mj_step` -- are MuJoCo's oldest and most stable API,
+# unchanged across the whole of 3.x. So the ceiling is the next major version
+# rather than a release nobody has seen yet.
+pythonRequirements:
+  - mujoco>=3.2,<4
+
+simulation:
+  mujoco:
+    desc: Run the scene in MuJoCo under gravity and report where everything ended up.
+    path: simulate_mujoco.py
+    # The format the scene is handed over in. PartCAD exports the scene to it
+    # before this script is started, so this is what decides which exporter runs
+    # rather than anything the script says at runtime.
+    format: mjcf
+    # How that export is asked for. A scene states where things are, so the MJCF
+    # exporter welds every body to the world by default and nests the bodies as
+    # the tree nests -- and a simulation of a model whose parts cannot move
+    # relative to each other has nothing to report. So a run asks for the
+    # opposite of both. It is stated here, by the plugin, because the plugin is
+    # what knows it.
+    formatOptions:
+      static: false
+      flatten: true
+    # How long, in seconds of simulated time. Ten is long enough for something
+    # that is going to fall over to have fallen over and come to rest.
+    duration: 10.0
+    # MuJoCo's own timestep unless this says otherwise, in seconds.
+    # timestep: 0.002
+    gravity: [0.0, 0.0, -9.81]
+    # Report where every body is at each of these many evenly spaced instants,
+    # as 'samples'. Zero -- the default -- reports only 'before' and 'after',
+    # which is what a validation reads.
+    samples: 0
