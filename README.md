@@ -71,20 +71,24 @@ of one `simulate:` entry (per simulation).
 ## Friction is a fact about the material
 
 Whether a stack of blocks stands up is not a property of its geometry. Two 20 mm
-blocks squarely stacked, ten seconds under gravity, nothing else changed:
+cubes squarely stacked, ten seconds under gravity, nothing changed but the
+coefficient the blocks are given:
 
-| sliding friction | what happens |
+| sliding friction | what happens to the top block |
 | --- | --- |
-| 0.0 | the stack scatters — 172 mm |
-| 0.05 | the top block slides off — 62 mm |
-| 0.2 | nothing moves — 0.3 mm |
-| 1.0 | nothing moves — 1.0 mm |
+| 0.04 (PTFE) | slides off and ends up on the floor — 35 mm |
+| 0.4 | the same |
+| 0.5 | it stays — 3 mm of settling |
+| 1.05 (dry aluminium) | it stays — 1 mm |
 
-So state it. A part that declares a `material:` whose material states `mu` gets
-that coefficient written into the MJCF, and the simulation answers for the
-material the part is actually made of. A part that states neither gets MuJoCo's
-default of 1.0 — a plausible number for metal on metal, a badly wrong one for
-PTFE, and in either case a number nobody chose.
+So state it. A part that declares a material whose `mu` is set gets that
+coefficient written into the MJCF, and the simulation answers for the material
+the part is actually made of. A part that states neither gets MuJoCo's default
+of 1.0 — a plausible number for metal on metal, a badly wrong one for PTFE, and
+in either case a number nobody chose.
+
+PartCAD writes each body's own coefficient and says nothing about how the two
+sides of a contact combine: that is MuJoCo's model rather than the part's.
 
 ## Where this came from
 

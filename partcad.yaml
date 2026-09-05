@@ -52,8 +52,9 @@ docs:
     ### Friction is a fact about the material, not about MuJoCo
 
     Whether a stack of blocks stands up is not a property of its geometry. Two
-    20 mm blocks squarely stacked stay put at a sliding friction of 0.2 and
-    scatter at 0.0, and nothing about the arrangement changes in between.
+    20 mm cubes squarely stacked stay put at a sliding friction of 0.5 and the
+    top one slides off at 0.4, and nothing about the arrangement changes in
+    between.
 
     So state it. A part that declares a `material:` whose material states `mu`
     gets that coefficient written into the MJCF, and the simulation answers for
