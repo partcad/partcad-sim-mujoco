@@ -1,0 +1,36 @@
+# A package that reads an MJCF model through this plugin, for the tests to use.
+#
+# It declares the plugin as a `local` dependency on the repository this file is
+# in, which is what a user's package declares as a `git` one. That is the point:
+# what is under test is the plugin being used the way a package uses it, and a
+# `path` to the checkout is the same graph a URL would produce without a clone
+# in the middle of every test run.
+#
+# Deliberately unnamed. A root package's `name:` is what it calls itself, and a
+# dependency of it is then addressed under that name -- so naming this one
+# `//test` would put the plugin at `//test/sim-mujoco` while the context
+# registers it at `//sim-mujoco`, and `type: sim-mujoco:mjcf` would resolve to
+# nothing. A package a user writes has that name from where it was imported; a
+# root one has no such thing.
+#
+# The same file twice, as both kinds. That is the thing about MJCF: an MJCF
+# model of a robot arm is an assembly, an MJCF model of the table it stands on
+# is a scene, and nothing in the file says which -- so the section it is
+# declared in is what said it.
+
+dependencies:
+  sim-mujoco:
+    type: local
+    path: ../..
+
+scenes:
+  stack:
+    type: sim-mujoco:mjcf
+    desc: An MJCF model used directly as a PartCAD scene
+    path: stack.xml
+
+assemblies:
+  robot:
+    type: sim-mujoco:mjcf
+    desc: The same file, read as one product rather than an arrangement of them
+    path: stack.xml

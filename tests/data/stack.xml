@@ -1,0 +1,19 @@
+<!--
+  An MJCF model used directly as a PartCAD object, for the tests beside this.
+
+  Two blocks, one on the other, and a ground plane under them. The plane is what
+  a static arrangement has nowhere to put and is counted rather than dropped in
+  silence; `pc info stack` lists the tally.
+-->
+<mujoco model="stack">
+  <compiler angle="degree"/>
+  <worldbody>
+    <geom name="floor" type="plane" size="5 5 0.1"/>
+    <body name="bottom" pos="0 0 0.01">
+      <geom name="bottom_geom" type="box" size="0.01 0.01 0.01" rgba="0.7 0.7 0.75 1"/>
+    </body>
+    <body name="top" pos="0 0 0.03">
+      <geom name="top_geom" type="box" size="0.01 0.01 0.01" rgba="0.8 0.6 0.3 1"/>
+    </body>
+  </worldbody>
+</mujoco>
