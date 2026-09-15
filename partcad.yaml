@@ -206,8 +206,9 @@ import:
     # How many digits the placements coming back are rounded to. Six is a
     # micrometre at millimetre scale, which is finer than any MJCF states.
     precision: 6
-    # How deep an '<include>' chain is followed before the reader gives up and
-    # reports it, so that a file including itself is an error and not a hang.
+    # How deeply bodies may nest before the reader stops descending and reports
+    # it. An '<include>' cycle is not what this guards -- the reader keeps the
+    # files it has already read and refuses a repeat outright.
     max_depth: 16
     dropped:
       friction: "torsional and rolling friction (the sliding coefficient is kept)"
