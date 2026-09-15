@@ -36,6 +36,13 @@ $ pc sim -a stack
 INFO: //your/package:stack: the simulation 'stands' validated
 ```
 
+> [!IMPORTANT]
+> Naming this package's reader by its full path — `type: sim-mujoco:mjcf` — needs
+> a PartCAD carrying [partcad/partcad#643](https://github.com/partcad/partcad/pull/643).
+> Earlier releases look the package up from the root while the package declaring
+> the object is still loading, find nothing, and record the object as broken. The
+> `simulation:` entry works on any release.
+
 ## Four entry points, one format
 
 MuJoCo describes a model in **MJCF**, an XML dialect of its own. This package

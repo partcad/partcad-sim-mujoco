@@ -55,6 +55,26 @@ DATA = os.path.join(HERE, "tests", "data")
 STL_EXAMPLE = os.path.join(DATA, "cube.stl")
 
 
+# Naming this package's reader by its full path -- `type: sim-mujoco:mjcf` --
+# has to resolve while the package that declares the object is still loading,
+# because a package's objects are created as part of loading it. PartCAD grew
+# `Context.get_project_from()` for exactly that in partcad/partcad#643; a release
+# without it looks the package up from the root, which is not registered yet,
+# records the object as broken on the way in, and answers None from then on.
+#
+# That is a fact about that PartCAD rather than about anything here, so the
+# three tests that build such a package say so and are skipped, while the
+# thirty-odd that test the reader and the writer directly run against any
+# release. A capability probe rather than a version comparison: what matters is
+# whether this PartCAD can do it, and the check stops firing of its own accord
+# the moment a release can.
+RESOLVES_A_PLUGIN_TYPE = hasattr(pc.Context, "get_project_from")
+NEEDS_NEWER_PARTCAD = (
+    "this PartCAD (%s) cannot resolve 'sim-mujoco:mjcf' while the package declaring it loads; "
+    "it needs the 'Context.get_project_from()' fix from partcad/partcad#643" % pc.__version__
+)
+
+
 def dropped_labels():
     """How this package's own declaration words each counter the reader reports.
 
@@ -421,6 +441,9 @@ def mjcf_package(tmp_path, monkeypatch):
     either produces is the same one.
     """
     import shutil
+
+    if not RESOLVES_A_PLUGIN_TYPE:
+        pytest.skip(NEEDS_NEWER_PARTCAD)
 
     root = tmp_path / "workspace"
     shutil.copytree(DATA, root)
