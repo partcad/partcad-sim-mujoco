@@ -1,0 +1,55 @@
+# What this package can be checked for without running a simulation.
+#
+# Reading and writing an MJCF model do not involve MuJoCo at all -- they are XML
+# and arithmetic -- so that is what is under test here, and it is most of this
+# package. Running a model is one call into MuJoCo's own loader and stepper.
+#
+# Nightly as well as on a push, because half of what is under test is written
+# against PartCAD's sandbox contract -- `ocp_serialize`, `urdf_common`,
+# `primitive_shapes` -- which lives in a package with a release cycle of its own.
+# A PartCAD release that moves one of those should fail here rather than in
+# somebody's `pc info`.
+name: Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    - cron: "0 5 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The ends of what PartCAD supports. What happens in between is not a
+        # different answer for code that is this close to the standard library.
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          # `partcad` for the sandbox contract the reader and the writer are
+          # written against, which is what `test_world.py` imports.
+          python -m pip install pytest pyyaml partcad
+
+      - name: Run the tests
+        run: pytest -v

@@ -1,52 +1,71 @@
-# The MuJoCo simulation plugin for PartCAD.
+# The MuJoCo plugin for PartCAD: everything PartCAD knows about MJCF, and the
+# simulator that runs it.
 #
-# A simulation plugin is declared exactly as an export or a render
-# implementation is -- a `path` to a script, the sandbox that script needs, and
-# the parameters it is handed -- and the section it goes in is what says which
-# of the three it is. What differs is what it does with them: an export writes a
-# file, a render draws a picture, and a simulation *runs* the scene and reports
-# what happened.
+# Four entry points, one per thing PartCAD can be taught by a package, and all
+# four are about the same format:
 #
-# The contract is narrow on purpose:
+#   export:      write a PartCAD scene or assembly out as an MJCF model
+#   import:      read an MJCF model back in as a PartCAD scene or assembly
+#   simulation:  run one in MuJoCo and say where everything ended up
+#   open:        open one in the MuJoCo viewer (`pc open --with mujoco`)
+#
+# They are declared together because they are one piece of knowledge. A reader
+# and a writer of the same format disagree the moment they are maintained apart,
+# and the simulator is what decides what the file has to say in the first place.
+#
+# The simulation was never in the `partcad` wheel and the other three were,
+# until 0.8.80. None of them should be: MuJoCo is somebody's program with a
+# release cycle of its own, MJCF is MuJoCo's, and pinning either in the wheel
+# would make every PartCAD release a statement about which MuJoCo you get.
+# PartCAD ships the *concept* -- the `simulate:` section, the sandbox wrapper,
+# the runner, the sections below -- and a package supplies the physics.
+#
+# `urdf` is the counter-example and stays in PartCAD's `//builtin/import`: a
+# URDF describes a robot rather than any one engine's world, and ROS, MuJoCo,
+# PyBullet and Isaac all read it.
+#
+# A simulation plugin's contract is narrow on purpose:
 #
 #   in    a scene with the subject in it, as a file, in the format `format:`
-#         names -- PartCAD exports it before this script is started
+#         names -- PartCAD exports it before this script is started, with the
+#         `export:` entry below
 #   out   JSON carrying at least `before` and `after`
 #
 # What is inside `before` and `after`, and anything else beside them, is this
 # plugin's own vocabulary. PartCAD does not read it: it hands the two objects to
 # the `validation:` expression of the `simulate:` that asked for the run, and
 # reports what the expression says.
-#
-# This package used to ship inside the `partcad` wheel as `//builtin/simulate`.
-# It does not any more, and should not: PartCAD ships the *concept* -- the
-# section, the sandbox wrapper, the runner -- and a simulator is somebody's
-# program with a release cycle of its own. Nothing about it needs to be in a CAD
-# tool's wheel, and pinning MuJoCo there would have made every PartCAD release a
-# statement about which MuJoCo you get.
 
 name: //pub/feature/simulate/mujoco
-desc: Physics simulation of a PartCAD scene, run in MuJoCo.
+desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 
 docs:
   intro: |
-    Runs a PartCAD scene in [MuJoCo](https://mujoco.org/) under gravity and
-    reports where everything ended up, so that a part or an assembly can state
-    what it is supposed to do -- or not do -- and have that checked.
+    [MuJoCo](https://mujoco.org/) describes a model in **MJCF**, an XML dialect
+    of its own. This package is everything PartCAD knows about that format and
+    the program that reads it.
 
-    The scene is handed over as MJCF, MuJoCo's own model format, which PartCAD
-    writes (`pc export -t mjcf`): every body free to move, a ground plane under
-    it, and one body per shape the scene places. The model is then stepped for
-    `duration` seconds of simulated time.
+    A PartCAD scene or assembly exports to an `.xml` MJCF model and an MJCF
+    model imports back as one, so a model somebody else wrote is an object you
+    can place parts in, and an object you built out of parts is a model MuJoCo
+    can run.
 
-    `before` and `after` each carry `time` and a `bodies` object: one entry per
-    body, holding its position `pos` and its orientation `quat` (`w x y z`).
-    Positions are in **millimetres**, PartCAD's unit everywhere, not the metres
-    MuJoCo works in -- a validation expression is written by whoever wrote the
-    part, against the numbers that part is drawn in.
+    MJCF is the one format routinely used for both an assembly and a scene, and
+    nothing in the file says which: an MJCF model of a robot arm is an assembly,
+    an MJCF model of the table it stands on is a scene. So it declares both, and
+    the section a package puts it in is what it meant.
+
+    `pc sim` runs one under gravity and reports where everything ended up, so
+    that a part or an assembly can state what it is supposed to do -- or not do
+    -- and have that checked. `before` and `after` each carry `time` and a
+    `bodies` object: one entry per body, holding its position `pos` and its
+    orientation `quat` (`w x y z`). Positions are in **millimetres**, PartCAD's
+    unit everywhere, not the metres MuJoCo works in -- a validation expression
+    is written by whoever wrote the part, against the numbers that part is
+    drawn in.
 
     Nothing has to be installed by hand: PartCAD installs this package's Python
-    requirements into the sandbox it runs this implementation in, so a machine
+    requirements into the sandbox it runs each implementation in, so a machine
     with no MuJoCo on it simulates just the same.
 
     ### Friction is a fact about the material, not about MuJoCo
@@ -62,13 +81,19 @@ docs:
     MuJoCo's own default of 1.0 -- which is a plausible number for metal on
     metal and a badly wrong one for PTFE, and, worse, is a number nobody chose.
   usage: |
-    Import this package and name it from a `simulate:` section:
+    Import this package and name it from the sections that use it:
 
     ```yaml
     dependencies:
       sim-mujoco:
         type: git
         url: https://github.com/partcad/partcad-sim-mujoco.git
+
+    scenes:
+      table:
+        # A model somebody else wrote, read as a PartCAD scene.
+        type: sim-mujoco:mjcf
+        path: table.xml
 
     assemblies:
       stack:
@@ -85,11 +110,14 @@ docs:
     ```
 
     ```shell
-    pc sim -a stack          # run it and check the validation
-    pc sim --json -a stack   # and print everything MuJoCo reported
+    pc sim -a stack                          # run it and check the validation
+    pc sim --json -a stack                   # and print everything MuJoCo reported
+    pc export -t sim-mujoco:mjcf -a stack    # write the model out
+    pc open --with mujoco stack.xml          # and look at it
     ```
 
-    Any parameter below can be set per simulation without a plugin of its own:
+    Any parameter of the simulation can be set per run without a plugin of its
+    own:
 
     ```yaml
             params:
@@ -97,35 +125,136 @@ docs:
               samples: 10
     ```
 
-# What the sandbox this package's implementation runs in needs installed.
-#
-# MuJoCo and nothing else: the plugin is handed a file and reads it with
-# MuJoCo's own loader, so the sandbox needs no CAD stack at all.
-#
-# A range rather than an exact pin. PartCAD pins its own CAD packages because
-# two of them write the same OCP native module and disagreeing versions crash
-# the wrapper with no traceback; nothing here shares a native module with
-# anything, and the four calls this plugin makes -- `MjModel.from_xml_path`,
-# `MjData`, `mj_forward`, `mj_step` -- are MuJoCo's oldest and most stable API,
-# unchanged across the whole of 3.x. So the ceiling is the next major version
-# rather than a release nobody has seen yet.
-pythonRequirements:
-  - mujoco>=3.2,<4
+export:
+  mjcf:
+    desc: |
+      MJCF, the XML MuJoCo describes a model in: an `.xml` file plus the mesh
+      files it references. It is the format a scene or an assembly is handed to
+      a MuJoCo simulation in, and it is what `pc open --with mujoco` converts a
+      scene to before opening it.
+
+      It is handed the assembly *tree* itself rather than the geometry it
+      decodes to (`decode: false`) -- one body per object placed in the scene,
+      named, placed and looked up by what the tree says.
+    path: export_mjcf.py
+    extension: xml
+    # 'decode: false' -- the exporter walks the assembly envelopes itself.
+    # Decoding them into live geometry would keep the tree's shape but drop
+    # every node's name and label and bake its placement in, leaving nothing to
+    # name, group or place the bodies by. See 'wrappers/wrapper_export.py' in
+    # PartCAD itself.
+    decode: false
+    # OpenCASCADE and nothing else: this is XML and arithmetic, plus the
+    # triangulation of what it writes. No MuJoCo is involved in writing a model.
+    pythonRequirements:
+      - cadquery-ocp==7.9.3.1.1
+    # The meshes are written by this exporter itself, so it takes the mesh
+    # options too. 'ascii' stays false: MuJoCo reads binary STL only.
+    tolerance: 0.1
+    angularTolerance: 0.1
+    ascii: false
+    # A scene states where things are, so nothing in it is meant to move: every
+    # body is welded to the world unless this is turned off, which is what gives
+    # each of them a '<freejoint>'. The simulation below turns it off, because a
+    # simulation of a model that cannot move has nothing to report.
+    static: true
+    # Write every node that holds geometry as a body of the '<worldbody>'
+    # itself, at the world pose the tree puts it at, rather than nesting the
+    # bodies as the tree nests. A nested body with no joint above it is one
+    # rigid body with its parent, which is right for a rigid product and wrong
+    # for a stack of blocks that is meant to be able to fall over. The
+    # simulation turns it on for the same reason it turns 'static' off.
+    flatten: false
+    # What makes the file usable rather than what the scene says: a model with
+    # no light renders black, and one with no ground has nothing to stand on.
+    # The plane is a geom of the '<worldbody>' itself, so it is static whatever
+    # 'static' says.
+    light: true
+    ground_plane: true
+    # 'model_name' defaults to the object's label, 'mesh_dir' to
+    # '<file stem>_meshes' next to the model file, 'density' (kg/m^3) to the
+    # exporter's own default, and 'timestep' to MuJoCo's.
+    # model_name: <name>
+    # mesh_dir: <directory>
+    # density: 2700.0
+    # timestep: 0.002
+    gravity: [0.0, 0.0, -9.81]
+    # Hand the exporter what the parts report about themselves -- mass,
+    # friction, colour -- so that it writes those rather than losing them.
+    properties: true
+
+import:
+  mjcf:
+    desc: |
+      MJCF, the XML MuJoCo describes a model in: a `<worldbody>` holding bodies,
+      each body holding geoms and further bodies. Read at the model's initial
+      state -- every body where its own `pos` and orientation put it -- which is
+      the tree an ASSY file produces.
+
+      It is the one format routinely used for both an assembly and a scene, and
+      nothing in the file says which, so it declares both and the section a
+      package puts it in is what it meant.
+
+      Reading a model is not running one: this is XML and arithmetic, and no
+      MuJoCo installation is involved. Running it is `pc sim`.
+    path: import_mjcf.py
+    extension: xml
+    kinds: [assembly, scene]
+    noun: model
+    pythonRequirements:
+      - cadquery-ocp==7.9.3.1.1
+    # How many digits the placements coming back are rounded to. Six is a
+    # micrometre at millimetre scale, which is finer than any MJCF states.
+    precision: 6
+    # How deep an '<include>' chain is followed before the reader gives up and
+    # reports it, so that a file including itself is an error and not a hang.
+    max_depth: 16
+    dropped:
+      friction: "torsional and rolling friction (the sliding coefficient is kept)"
+      joint: "joints (the object shows the bodies at their initial pose)"
+      actuator: actuators
+      tendon: tendons
+      equality: "equality constraints"
+      contact: "contact pairs and exclusions"
+      sensor: sensors
+      light: lights
+      camera: cameras
+      site: sites
+      keyframe: keyframes
+      plugin: "engine plugins"
+      geometry: "geoms PartCAD has no shape for"
+      include: "included files that could not be resolved"
 
 simulation:
   mujoco:
     desc: Run the scene in MuJoCo under gravity and report where everything ended up.
     path: simulate_mujoco.py
-    # The format the scene is handed over in. PartCAD exports the scene to it
-    # before this script is started, so this is what decides which exporter runs
-    # rather than anything the script says at runtime.
+    # What this implementation's sandbox needs installed.
+    #
+    # MuJoCo and nothing else: the plugin is handed a file and reads it with
+    # MuJoCo's own loader, so the sandbox needs no CAD stack at all. Stated on
+    # the implementation rather than on the package so that writing a model --
+    # which needs OpenCASCADE and no MuJoCo -- does not pay for a simulator, and
+    # running one does not pay for a CAD kernel.
+    #
+    # A range rather than an exact pin. PartCAD pins its own CAD packages
+    # because two of them write the same OCP native module and disagreeing
+    # versions crash the wrapper with no traceback; nothing here shares a native
+    # module with anything, and the four calls this plugin makes --
+    # `MjModel.from_xml_path`, `MjData`, `mj_forward`, `mj_step` -- are MuJoCo's
+    # oldest and most stable API, unchanged across the whole of 3.x. So the
+    # ceiling is the next major version rather than a release nobody has seen
+    # yet.
+    pythonRequirements:
+      - mujoco>=3.2,<4
+    # The format the scene is handed over in, resolved in this package: the
+    # `export:` entry above is what writes it. PartCAD exports the scene before
+    # this script is started, so this is what decides which exporter runs rather
+    # than anything the script says at runtime.
     format: mjcf
-    # How that export is asked for. A scene states where things are, so the MJCF
-    # exporter welds every body to the world by default and nests the bodies as
-    # the tree nests -- and a simulation of a model whose parts cannot move
-    # relative to each other has nothing to report. So a run asks for the
-    # opposite of both. It is stated here, by the plugin, because the plugin is
-    # what knows it.
+    # How that export is asked for -- the opposite of what a scene means on its
+    # own, for the reasons `static` and `flatten` give above. It is stated here,
+    # by the plugin, because the plugin is what knows it.
     formatOptions:
       static: false
       flatten: true
@@ -139,3 +268,22 @@ simulation:
     # as 'samples'. Zero -- the default -- reports only 'before' and 'after',
     # which is what a validation reads.
     samples: 0
+
+open:
+  mujoco:
+    displayName: MuJoCo
+    # DeepMind's own image. `:latest`, because a user asking for a container
+    # wants the current MuJoCo, and `--docker-image` is the answer for anyone
+    # who wants another.
+    image: ghcr.io/google-deepmind/mujoco:latest
+    # `simulate` is the viewer the MuJoCo release ships; `mujoco` is what a
+    # distribution package sometimes calls it. Whichever the machine has is the
+    # one used.
+    binaries: [simulate, mujoco]
+    macosApps: [MuJoCo.app]
+    macosExecutable: Contents/MacOS/simulate
+    windowsGlobs: ["MuJoCo*/bin/simulate.exe", "mujoco*/bin/simulate.exe"]
+    # MuJoCo reads MJCF and no other model format. A scene given as anything
+    # else -- a Gazebo world, above all -- is written out as MJCF first, which
+    # is `pc export -t mjcf` and so is the daemon's work.
+    sceneType: mjcf
