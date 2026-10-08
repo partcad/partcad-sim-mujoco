@@ -326,8 +326,14 @@ def _ground(picture, plane, ident):
     # How squarely the floor faces the viewer: one looking straight down, near
     # nothing at a grazing angle, where a square is drawn that much flatter.
     facing = abs(normal @ camera.axes[2])
-    # Centred under the middle of the picture, so it reaches the edges.
+    # Centred under the middle of the picture, so it reaches the edges: where
+    # the line of sight through the middle meets the plane. The middle of the
+    # picture as the camera states it is a point on the plane through the
+    # origin that faces the camera, which for a scene far from the origin is
+    # nowhere near the floor under it. Seen edge on is excluded above.
+    toward = camera.axes[2]
     middle = camera.center[0] * camera.axes[0] + camera.center[1] * camera.axes[1]
+    middle = middle + toward * (((origin - middle) @ normal) / (toward @ normal))
     local = rotation.T @ (middle - origin)
     # A round number (1, 2 or 5 times a power of ten) near a tenth of what the
     # picture shows, and large enough that a square seen this flat is still a

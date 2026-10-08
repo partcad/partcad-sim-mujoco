@@ -128,6 +128,20 @@ def test_the_floor_is_drawn_under_the_scene_and_does_not_decide_the_framing(tmp_
     assert not is_background(image[-1, -1])
 
 
+def test_the_floor_is_under_a_scene_far_from_the_origin_too(tmp_path):
+    """The floor is centred where the line of sight through the middle of the
+    picture meets it, not where that line crosses the plane through the origin
+    -- which, for a scene a long way from the origin, is off the picture."""
+    plane = {"origin": np.zeros(3), "axes": np.eye(3), "color": (0.8, 0.8, 0.8)}
+    scene = {"solids": [cube((1000, 0, 1))], "planes": [plane]}
+
+    snapshot_raster.take(str(tmp_path), dict(SNAPSHOT, files={"after": "a.png"}), {"after": scene})
+    image = read_png(str(tmp_path / "a.png"))
+
+    assert not is_background(image[0, 0])
+    assert not is_background(image[-1, -1])
+
+
 def test_only_png_is_drawn(tmp_path):
     with pytest.raises(ValueError, match="PNG"):
         snapshot_raster.take(str(tmp_path), dict(SNAPSHOT, format="jpeg"), {"before": {"solids": []}})
