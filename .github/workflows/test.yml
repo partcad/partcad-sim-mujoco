@@ -50,6 +50,10 @@ jobs:
           # `partcad` for the sandbox contract the reader and the writer are
           # written against, which is what `test_world.py` imports.
           python -m pip install pytest pyyaml partcad
+          # MuJoCo itself, so that the simulation and the snapshots it takes
+          # run end to end rather than being skipped (`test_snapshot.py`). The
+          # same range the plugin's `pythonRequirements` asks the sandbox for.
+          python -m pip install "mujoco>=3.2,<4"
 
       - name: Run the tests
         run: pytest -v

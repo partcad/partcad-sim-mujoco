@@ -99,6 +99,34 @@ Nothing has to be installed by hand. PartCAD installs this package's Python
 requirements into the sandbox it runs the implementation in, so a machine with
 no MuJoCo on it simulates just the same.
 
+## Snapshots
+
+PartCAD asks every run for two pictures of the scene — one before anything
+moved, one when the time is up — and says where to take them from: the scene's
+own `render: png:` viewpoint (`viewport_origin`, `viewport_up`), the same one
+`pc render` uses, or the corner a rendered part is drawn from when nothing says
+otherwise. This package draws them, writes them into the run directory and
+reports them beside the result:
+
+```json
+{"snapshots": {"before": "snapshot-before.png", "after": "snapshot-after.png"}}
+```
+
+They are what the PartCAD IDE's **Validation → Simulation** tab shows side by
+side, and `pc sim` says where they were written.
+
+They are MuJoCo's own compiled geometry — its meshes and its primitives — at
+MuJoCo's own poses, rasterized on the CPU with numpy (`snapshot_raster.py`).
+Not MuJoCo's OpenGL renderer: a headless OpenGL needs EGL or OSMesa, native
+libraries no wheel carries and PartCAD's sandbox images do not have, and a
+picture that only a machine with a GPU driver set up can take is one most runs
+would never get. Both pictures are framed alike, on everything either of them
+holds, over a floor whose squares are fixed to the world — so a block that fell
+is lower in the frame and further along the floor, rather than re-centred.
+
+A picture that cannot be drawn is a warning, never a failed run: the verdict
+does not depend on it.
+
 ## Parameters
 
 Set any of these as fields of the simulation (per package), or in the `params:`
@@ -143,6 +171,11 @@ pytest
 against the sandbox contract that lives there — `ocp_serialize`, `urdf_common`
 and `primitive_shapes` — and the tests import them the same way a sandbox does.
 It needs no MuJoCo, because reading and writing a model do not involve one.
+
+`test_snapshot.py` needs numpy for the pictures, and MuJoCo for the half that
+runs the simulation end to end — a stack whose top block falls off, drawn
+before and after. That half is skipped where MuJoCo is not installed; CI
+installs it.
 
 ## Where this came from
 

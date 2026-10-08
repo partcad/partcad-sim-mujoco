@@ -269,6 +269,12 @@ simulation:
     # as 'samples'. Zero -- the default -- reports only 'before' and 'after',
     # which is what a validation reads.
     samples: 0
+    # The two pictures PartCAD asks every run for, of the scene before and
+    # after, are not configured here: PartCAD says where they go and where they
+    # are taken from (the scene's own 'render: png:' viewpoint) in the request.
+    # They are drawn on the CPU from MuJoCo's compiled model, with numpy -- which
+    # MuJoCo already brings, so there is nothing to add to 'pythonRequirements'.
+    # See 'snapshot_raster.py' for why not with MuJoCo's own OpenGL renderer.
 
 open:
   mujoco:
