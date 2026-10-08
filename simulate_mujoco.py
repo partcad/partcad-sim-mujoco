@@ -18,6 +18,11 @@ Positions are reported in **millimetres**, PartCAD's unit everywhere, not in the
 metres MuJoCo works in. A validation expression is written by whoever wrote the
 part, against the numbers that part is drawn in.
 
+It also draws the two pictures PartCAD asks for -- the scene before and after,
+from the viewpoint the request names -- out of the very model it steps; see
+'snapshot_raster.py'. They never decide anything: a picture that cannot be
+drawn is a warning beside the result.
+
 Nothing here is specific to what is being simulated. A body is a body, and the
 reading is "where is it and which way is it facing" -- which is all a static
 description of a scene ever had to say, and so all that can be compared against
@@ -26,12 +31,24 @@ states it beside 'before' and 'after' in its own vocabulary; see
 'wrappers/wrapper_simulate.py' in PartCAD itself, which is what runs this.
 """
 
+import os
+import sys
+
+# 'snapshot_raster' is this package's, beside this file. PartCAD runs this
+# script by path, which puts nothing on sys.path for it.
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 # Millimetres per metre: MJCF is metres by definition, PartCAD is millimetres
 # throughout. Spelled out rather than imported from PartCAD's own
 # 'urdf_common' because this script runs in a sandbox that carries MuJoCo and
 # nothing else -- and because this package is not PartCAD and does not get to
 # reach into it.
 MM_PER_M = 1000.0
+
+# MuJoCo's own viewer shows geom groups 0 to 2 and hides the rest, and models
+# put what is only there to collide - a convex hull, a simplified proxy - in a
+# group above those. The snapshots show what MuJoCo's viewer would.
+VISIBLE_GROUPS = 3
 
 
 def snapshot(mujoco, model, data):
@@ -54,7 +71,89 @@ def snapshot(mujoco, model, data):
     return {"time": float(data.time), "bodies": bodies}
 
 
-def process(path, request):  # pylint: disable=unused-argument
+def geometry(mujoco, model, data):
+    """What the scene looks like right now, in the terms 'snapshot_raster' draws.
+
+    MuJoCo's own compiled geometry at MuJoCo's own poses: a mesh geom is the
+    mesh MuJoCo loaded (re-centred on its own frame, which is the frame the geom
+    is placed in), a primitive is tessellated, and a plane is the floor. Every
+    geom of one body is one thing, so the outlines are drawn around bodies
+    rather than around the pieces a body was written as.
+    """
+    import snapshot_raster
+
+    solids, planes = [], []
+    for index in range(model.ngeom):
+        material = model.geom_matid[index]
+        rgba = model.mat_rgba[material] if material >= 0 else model.geom_rgba[index]
+        if rgba[3] <= 0 or model.geom_group[index] >= VISIBLE_GROUPS:
+            continue
+        kind = model.geom_type[index]
+        rotation = data.geom_xmat[index].reshape(3, 3)
+        position = data.geom_xpos[index]
+        size = model.geom_size[index]
+        color = [float(v) for v in rgba[:3]]
+        if kind == mujoco.mjtGeom.mjGEOM_PLANE:
+            planes.append({"origin": position.copy(), "axes": rotation.copy(), "color": color})
+            continue
+        if kind == mujoco.mjtGeom.mjGEOM_MESH:
+            mesh = model.geom_dataid[index]
+            start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
+            first, faces = model.mesh_faceadr[mesh], model.mesh_facenum[mesh]
+            local = model.mesh_vert[start : start + count][model.mesh_face[first : first + faces]]
+        elif kind == mujoco.mjtGeom.mjGEOM_BOX:
+            local = snapshot_raster.box(size)
+        elif kind == mujoco.mjtGeom.mjGEOM_SPHERE:
+            local = snapshot_raster.ellipsoid(size[0], size[0], size[0])
+        elif kind == mujoco.mjtGeom.mjGEOM_ELLIPSOID:
+            local = snapshot_raster.ellipsoid(size[0], size[1], size[2])
+        elif kind == mujoco.mjtGeom.mjGEOM_CYLINDER:
+            local = snapshot_raster.cylinder(size[0], size[1])
+        elif kind == mujoco.mjtGeom.mjGEOM_CAPSULE:
+            local = snapshot_raster.capsule(size[0], size[1])
+        else:
+            # A height field or an SDF: nothing a scene PartCAD wrote holds.
+            continue
+        solids.append(
+            {
+                "triangles": snapshot_raster.place(local, rotation, position),
+                "color": color,
+                "id": int(model.geom_bodyid[index]),
+            }
+        )
+    return {"solids": solids, "planes": planes}
+
+
+def look(mujoco, model, data, warnings):
+    """'geometry', or None and a warning: reading it must not cost the run either."""
+    try:
+        return geometry(mujoco, model, data)
+    except Exception as e:  # pylint: disable=broad-except
+        warnings.append("the scene could not be read for the snapshots: %s: %s" % (type(e).__name__, e))
+        return None
+
+
+def take_snapshots(path, snapshot, scenes, warnings):
+    """Draw the pictures PartCAD asked for, and say which were drawn.
+
+    Never a reason for the run to fail: the verdict does not depend on a
+    picture, so a picture that cannot be drawn is a warning beside a result
+    rather than the loss of one.
+    """
+    # Both or neither: they are framed together, and one on its own is not a
+    # comparison.
+    if not snapshot or not path or any(scene is None for scene in scenes.values()):
+        return {}
+    try:
+        import snapshot_raster
+
+        return snapshot_raster.take(path, snapshot, scenes)
+    except Exception as e:  # pylint: disable=broad-except
+        warnings.append("the snapshots could not be drawn: %s: %s" % (type(e).__name__, e))
+        return {}
+
+
+def process(path, request):
     import mujoco
 
     scene_file = request["scene_file"]
@@ -78,6 +177,13 @@ def process(path, request):  # pylint: disable=unused-argument
     # the scene described, which is what 'before' has to be.
     mujoco.mj_forward(model, data)
     before = snapshot(mujoco, model, data)
+    # What PartCAD would like a picture of, and what the scene looks like now,
+    # for the first of them. Read now because by the end it has moved.
+    pictures = request.get("snapshot")
+    warnings = []
+    looks = {}
+    if pictures:
+        looks["before"] = look(mujoco, model, data, warnings)
 
     trace = []
     next_sample = duration / (samples + 1) if samples > 0 else None
@@ -90,6 +196,8 @@ def process(path, request):  # pylint: disable=unused-argument
             next_sample += duration / (samples + 1)
 
     after = snapshot(mujoco, model, data)
+    if pictures:
+        looks["after"] = look(mujoco, model, data, warnings)
 
     result = {
         "success": True,
@@ -107,4 +215,9 @@ def process(path, request):  # pylint: disable=unused-argument
     }
     if trace:
         result["samples"] = trace
+    drawn = take_snapshots(path, pictures, looks, warnings)
+    if drawn:
+        result["snapshots"] = drawn
+    if warnings:
+        result["warnings"] = warnings
     return result
