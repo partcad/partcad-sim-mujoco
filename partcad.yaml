@@ -64,6 +64,27 @@ docs:
     is written by whoever wrote the part, against the numbers that part is
     drawn in.
 
+    Beside `bodies`, each reading carries a `joints` object: one entry per
+    joint of the model, by the name the MJCF gives it, stated the way an
+    interface's `motion:` is -- degrees for a turn, millimetres for a move:
+
+    | `type` | in MJCF | `pos` | `vel` | `effort` |
+    | --- | --- | --- | --- | --- |
+    | `revolute` | a hinge with a `range` | degrees | deg/s | N·m |
+    | `continuous` | a hinge without one | degrees | deg/s | N·m |
+    | `prismatic` | a slide | mm | mm/s | N |
+    | `ball` | a ball | `quat` (`w x y z`) instead | `[x, y, z]` deg/s | `[x, y, z]` N·m |
+
+    `pos` is the joint's own coordinate, zero where the model placed the body
+    (or at the joint's `ref`). A ball joint's `vel` is about the axes of the
+    body's own frame. `effort` is what the model's actuators exert along the
+    joint -- the quantity an interface's `maxEffort` bounds -- and is zero for
+    a joint nothing drives. A free joint is not listed, because its
+    coordinate is the body's pose and `bodies` states that already; so a
+    model of free bodies, which is every scene PartCAD exports today, reports
+    `joints: {}`, and a validation can walk `after["joints"]` without asking
+    first whether there is one.
+
     Nothing has to be installed by hand: PartCAD installs this package's Python
     requirements into the sandbox it runs each implementation in, so a machine
     with no MuJoCo on it simulates just the same.

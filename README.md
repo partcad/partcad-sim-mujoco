@@ -81,8 +81,8 @@ reports where every body was at the start and at the end:
 
 ```json
 {
-  "before": {"time": 0.0,  "bodies": {"top": {"pos": [0, 0, 30], "quat": [1, 0, 0, 0]}}},
-  "after":  {"time": 10.0, "bodies": {"top": {"pos": [29.7, 0, 9.8], "quat": [...]}}},
+  "before": {"time": 0.0,  "bodies": {"top": {"pos": [0, 0, 30], "quat": [1, 0, 0, 0]}}, "joints": {}},
+  "after":  {"time": 10.0, "bodies": {"top": {"pos": [29.7, 0, 9.8], "quat": [...]}}, "joints": {}},
   "simulator": "mujoco", "duration": 10.0, "steps": 5000, "units": "mm"
 }
 ```
@@ -90,6 +90,61 @@ reports where every body was at the start and at the end:
 Positions are in **millimetres**, PartCAD's unit everywhere, not the metres
 MuJoCo works in: a `validation:` expression is written by whoever wrote the
 part, against the numbers that part is drawn in.
+
+### Joints
+
+A model with joints in it — a hinge, a slide, a ball — also says where each of
+them is, as `joints` beside `bodies`, keyed by the name the MJCF gives the
+joint and stated the way an interface's `motion:` is: **degrees** for a turn,
+**millimetres** for a move.
+
+```json
+"joints": {
+  "swing": {"type": "continuous", "pos": 90.0, "vel": 358.9, "effort": 0.0},
+  "lift":  {"type": "prismatic", "pos": -859.6, "vel": -4106.7, "effort": 0.0},
+  "wrist": {"type": "ball", "quat": [0.707, 0, 0.707, 0], "vel": [0, 358.9, 0], "effort": [0, 0, 0]}
+}
+```
+
+| `type` | in MJCF | `pos` | `vel` | `effort` |
+| --- | --- | --- | --- | --- |
+| `revolute` | a hinge with a `range` | degrees | deg/s | N·m |
+| `continuous` | a hinge without one | degrees | deg/s | N·m |
+| `prismatic` | a slide | mm | mm/s | N |
+| `ball` | a ball | `quat` (`w x y z`) instead | `[x, y, z]` deg/s | `[x, y, z]` N·m |
+
+* **`pos`** is the joint's own coordinate: zero where the model placed the body,
+  or at the joint's `ref` where it states one. A pendulum written out
+  horizontal reads 0 there and 90, one way or the other, hanging down.
+* A ball joint's **`quat`** is its turn away from where the model placed the
+  body, and its `vel` is the angular velocity about the axes of the body's own
+  frame — MuJoCo's own convention for it.
+* **`effort`** is what the model's actuators exert along the joint — MuJoCo's
+  `qfrc_actuator`, gear and force limits applied — which is the quantity an
+  interface's `maxEffort` bounds. It is zero for a joint nothing drives. It is
+  deliberately not the constraint force: what a limit or a contact pushes back
+  with is a reaction, and whether a motor was strong enough is a question about
+  the action.
+* A **free joint** is not listed. Its coordinate is the body's own position and
+  orientation, which `bodies` states already, in the same units. So a model of
+  free bodies — every scene PartCAD exports today — reports `"joints": {}`, and
+  a validation can walk `after["joints"]` without asking first whether it is
+  there.
+* A joint the MJCF does not name is `joint_<n>`, `n` being its index in the
+  compiled model: the rule `bodies` follows.
+* Joints are read at exactly `time`. Bodies are read where MuJoCo last
+  evaluated them, which after a step is up to one step earlier (2 ms at
+  MuJoCo's default) — so once anything moves, a joint's angle and its body's
+  orientation can disagree by a step's worth of motion.
+
+```yaml
+validation: after["joints"]["swing"]["pos"] > 80    # it swung down
+```
+
+[partcad-sim-gazebo](https://github.com/partcad/partcad-sim-gazebo) reports
+joints in the same vocabulary, so a validation of where a joint went reads the
+same against either engine. Gazebo publishes neither an effort nor a ball
+joint's orientation, so those two are MuJoCo's alone.
 
 PartCAD reads nothing inside `before` and `after`. It hands them to the
 `validation:` expression the package wrote and reports what that says — every
@@ -176,6 +231,12 @@ It needs no MuJoCo, because reading and writing a model do not involve one.
 runs the simulation end to end — a stack whose top block falls off, drawn
 before and after. That half is skipped where MuJoCo is not installed; CI
 installs it.
+
+`test_joints.py` runs a hand-written model — a pendulum on a hinge and on a
+ball joint, a carriage on a slide, one an actuator holds up — and checks the
+`joints` it reports against physics with a known answer: the speed a pendulum
+released from horizontal passes the bottom at, the quarter period it takes to
+get there, a fall along a slide in millimetres. It needs MuJoCo too.
 
 ## Where this came from
 
