@@ -842,6 +842,236 @@ def test_a_parameterized_name_does_not_become_the_model_name(export_mjcf, tmp_pa
     assert mujoco.get("model") == "subject"
 
 
+#
+# The scene's world: its gravity and the fluid it is filled with
+#
+
+# What PartCAD hands the exporter for a scene filled with fresh water at 15 C:
+# the material's own facts, in SI -- kg/m^3 and Pa*s, MuJoCo's units too.
+WATER = {"material": "//pub/std/manufacturing/material/fluid:water", "density": 999.1, "viscosity": 0.001138}
+
+# What PartCAD hands over for a 20 mm aluminium cube: its mass, centre and
+# inertia worked out from its solid at 2700 kg/m^3, and the volume it measured
+# that solid to enclose (see 'partcad.physics'). Nothing here is worked out by
+# the exporter, which is the point.
+ALUMINIUM_CUBE = {
+    "density": 2700.0,
+    "volume": 8000.0,
+    "mass": 0.0216,
+    "centerOfMass": [0.0, 0.0, 0.0],
+    "inertia": {"ixx": 1.44e-06, "ixy": 0.0, "ixz": 0.0, "iyy": 1.44e-06, "iyz": 0.0, "izz": 1.44e-06},
+}
+
+# The same cube as a sealed float that states it weighs 3 g: PartCAD scales the
+# solid's inertia to the stated mass, and the volume is still the whole solid's.
+FLOAT_CUBE = dict(
+    ALUMINIUM_CUBE,
+    mass=0.003,
+    inertia={"ixx": 2.0e-07, "ixy": 0.0, "ixz": 0.0, "iyy": 2.0e-07, "iyz": 0.0, "izz": 2.0e-07},
+)
+
+
+def one_cube():
+    return {"name": "//p:tank", "label": "tank", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+
+
+def resolved(physics):
+    """The properties index the export wrapper hands over for 'one_cube()'."""
+    return {"//p:cube": {"physics": dict(physics)}}
+
+
+def test_a_scene_that_states_no_world_gets_the_option_it_always_got(export_mjcf, tmp_path):
+    """MuJoCo's own gravity, in a vacuum: what every scene meant before it could say more."""
+    _result, mujoco = exported(export_mjcf, tmp_path / "a.xml", one_cube(), properties=resolved(ALUMINIUM_CUBE))
+
+    option = mujoco.find("option")
+    assert option.attrib == {"gravity": "0 0 -9.81"}
+    assert mujoco.find("worldbody/body").get("gravcomp") is None
+
+
+def test_the_scenes_gravity_is_written_in_the_scenes_own_frame(export_mjcf, tmp_path):
+    _result, mujoco = exported(export_mjcf, tmp_path / "a.xml", one_cube(), world={"gravity": [0.0, 0.0, -1.62]})
+
+    assert mujoco.find("option").get("gravity") == "0 0 -1.62"
+
+
+def test_a_gravity_given_to_the_export_itself_beats_the_scenes(export_mjcf, tmp_path):
+    """An explicit option is a decision about this file; the scene is the default for it."""
+    _result, mujoco = exported(
+        export_mjcf, tmp_path / "a.xml", one_cube(), gravity=[0.0, 0.0, -3.72], world={"gravity": [0.0, 0.0, -1.62]}
+    )
+
+    assert mujoco.find("option").get("gravity") == "0 0 -3.72"
+
+
+def test_this_package_states_no_gravity_of_its_own_to_beat_the_scenes_with():
+    """A default in the declaration would be an explicit option in every request."""
+    with open(os.path.join(HERE, "partcad.yaml"), encoding="utf-8") as f:
+        declared = yaml.safe_load(f)
+
+    assert "gravity" not in declared["export"]["mjcf"]
+    assert "gravity" not in declared["simulation"]["mujoco"]
+
+
+def test_the_fluid_is_written_as_it_arrives(export_mjcf, tmp_path):
+    """kg/m^3 and Pa*s in PartCAD and in MJCF alike: nothing is converted."""
+    _result, mujoco = exported(
+        export_mjcf, tmp_path / "a.xml", one_cube(), world={"medium": WATER}, properties=resolved(ALUMINIUM_CUBE)
+    )
+
+    option = mujoco.find("option")
+    assert option.get("density") == "999.1"
+    assert option.get("viscosity") == "0.001138"
+    # What MuJoCo recommends wherever velocity-dependent forces act.
+    assert option.get("integrator") == "implicitfast"
+
+
+def test_buoyancy_is_the_fluid_a_body_displaces_over_what_partcad_says_it_weighs(export_mjcf, tmp_path):
+    """Archimedes, as a fraction of the body's own weight -- MuJoCo has no buoyancy of its own.
+
+    The aluminium cube is buoyed by 999.1 / 2700 of its weight and sinks; the
+    float displaces 8 g of water and weighs 3 g, so it is buoyed by more than
+    its weight. Both numbers come from what PartCAD resolved, and neither is a
+    mass or a volume the exporter worked out.
+    """
+    _result, mujoco = exported(
+        export_mjcf, tmp_path / "a.xml", one_cube(), world={"medium": WATER}, properties=resolved(ALUMINIUM_CUBE)
+    )
+    assert float(mujoco.find("worldbody/body").get("gravcomp")) == pytest.approx(999.1 / 2700.0, rel=1e-5)
+
+    _result, mujoco = exported(
+        export_mjcf, tmp_path / "b.xml", one_cube(), world={"medium": WATER}, properties=resolved(FLOAT_CUBE)
+    )
+    body = mujoco.find("worldbody/body")
+    assert float(body.get("gravcomp")) == pytest.approx(999.1 * 8000.0e-9 / 0.003, rel=1e-5)
+    # And the mass it is reckoned against is the one on the body.
+    assert float(body.find("inertial").get("mass")) == pytest.approx(0.003)
+
+
+def test_a_body_of_several_shapes_displaces_what_all_of_them_enclose(export_mjcf, tmp_path):
+    apart = [[100.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]
+    wrist = {
+        "name": "//p:wrist",
+        "label": "wrist",
+        "assembly": [envelope("//p:a", "wrist/1", b"A"), envelope("//p:b", "wrist/2", b"B", apart)],
+    }
+    root = {"name": "//p:arm", "label": "arm", "assembly": [wrist]}
+    properties = {"//p:a": {"physics": dict(ALUMINIUM_CUBE)}, "//p:b": {"physics": dict(FLOAT_CUBE)}}
+
+    _result, mujoco = exported(export_mjcf, tmp_path / "a.xml", root, world={"medium": WATER}, properties=properties)
+
+    body = mujoco.find("worldbody/body")
+    assert float(body.get("gravcomp")) == pytest.approx(999.1 * 16000.0e-9 / (0.0216 + 0.003), rel=1e-5)
+
+
+def test_the_volume_is_not_reported_as_a_property_mjcf_cannot_state(export_mjcf, tmp_path):
+    result, _mujoco = exported(
+        export_mjcf, tmp_path / "a.xml", one_cube(), world={"medium": WATER}, properties=resolved(ALUMINIUM_CUBE)
+    )
+    assert result["unsupported"] == []
+
+
+def test_a_fluid_with_no_density_drags_but_does_not_buoy(export_mjcf, tmp_path):
+    medium = {"material": "//p:honey", "viscosity": 10.0}
+    _result, mujoco = exported(
+        export_mjcf, tmp_path / "a.xml", one_cube(), world={"medium": medium}, properties=resolved(ALUMINIUM_CUBE)
+    )
+
+    option = mujoco.find("option")
+    assert option.get("density") is None
+    assert option.get("viscosity") == "10"
+    assert mujoco.find("worldbody/body").get("gravcomp") is None
+
+
+def test_a_body_partcad_could_not_measure_is_given_no_buoyancy_and_says_so(export_mjcf, tmp_path):
+    """An open mesh has no volume PartCAD could measure; a guess would float it for no reason."""
+    shell = {key: value for key, value in ALUMINIUM_CUBE.items() if key != "volume"}
+    result, mujoco = exported(
+        export_mjcf, tmp_path / "a.xml", one_cube(), world={"medium": WATER}, properties=resolved(shell)
+    )
+
+    assert mujoco.find("worldbody/body").get("gravcomp") is None
+    assert any("no enclosed volume" in warning for warning in result["warnings"])
+
+
+def test_what_floats_rises_and_what_does_not_sinks(export_mjcf, monkeypatch, tmp_path):
+    """The whole of it, in MuJoCo: a model this exporter wrote, stepped for two seconds.
+
+    Two 10 mm cubes released 100 mm above the floor of a tank of water, each
+    handed over as PartCAD resolves it. One states it weighs half a gram -- half
+    the water it displaces -- and rises; the other is aluminium and sinks to the
+    floor. The same model with no fluid in it drops both, which is what makes it
+    the fluid that decided.
+    """
+    pytest.importorskip("mujoco")
+    import shutil
+
+    import simulate_mujoco
+
+    monkeypatch.setattr(export_mjcf, "write_mesh", lambda shape, path, options: shutil.copyfile(STL_EXAMPLE, path))
+    root = {
+        "name": "//p:tank",
+        "label": "tank",
+        "assembly": [
+            envelope("//p:float", "float", b"FLOAT", [[0.0, 0.0, 100.0], [0.0, 0.0, 1.0], 0.0]),
+            envelope("//p:sinker", "sinker", b"SINKER", [[50.0, 0.0, 100.0], [0.0, 0.0, 1.0], 0.0]),
+        ],
+    }
+
+    def cube(mass):
+        # 'cube.stl' is a 10 mm cube with a corner at the origin. m * a^2 / 6
+        # about any axis through its centre, as PartCAD derives it.
+        moment = mass * 0.01**2 / 6.0
+        return {
+            "volume": 1000.0,
+            "mass": mass,
+            "centerOfMass": [5.0, 5.0, 5.0],
+            "inertia": {"ixx": moment, "iyy": moment, "izz": moment, "ixy": 0.0, "ixz": 0.0, "iyz": 0.0},
+        }
+
+    properties = {"//p:float": {"physics": cube(0.0005)}, "//p:sinker": {"physics": cube(0.0027)}}
+
+    def run(name, **world):
+        path = tmp_path / name
+        exported(export_mjcf, path, root, flatten=True, static=False, properties=properties, **world)
+        result = simulate_mujoco.process(str(tmp_path), {"scene_file": str(path), "duration": 2.0})
+        moved = {}
+        for body in ("float", "sinker"):
+            moved[body] = result["after"]["bodies"][body]["pos"][2] - result["before"]["bodies"][body]["pos"][2]
+        return moved, result
+
+    risen, result = run("water.xml", world={"medium": WATER})
+    assert risen["float"] > 100.0
+    assert risen["sinker"] < -50.0
+    assert result["medium"]["density"] == pytest.approx(999.1)
+
+    fallen, result = run("vacuum.xml")
+    assert fallen["float"] < -50.0
+    assert fallen["sinker"] < -50.0
+    assert "medium" not in result
+
+
+def test_a_gravity_the_simulation_is_handed_beats_the_one_in_the_model(tmp_path):
+    """'params: {gravity: ...}' on a 'simulate:' is the explicit, per-run answer."""
+    pytest.importorskip("mujoco")
+    import simulate_mujoco
+
+    path = tmp_path / "scene.xml"
+    path.write_text(
+        '<mujoco><option gravity="0 0 -1.62"/><worldbody><body name="b" pos="0 0 1"><freejoint/>'
+        '<geom type="box" size="0.01 0.01 0.01"/></body></worldbody></mujoco>',
+        encoding="utf-8",
+    )
+
+    as_written = simulate_mujoco.process(str(tmp_path), {"scene_file": str(path), "duration": 0.01})
+    overridden = simulate_mujoco.process(
+        str(tmp_path), {"scene_file": str(path), "duration": 0.01, "gravity": [0.0, 0.0, -9.81]}
+    )
+
+    assert as_written["gravity"] == pytest.approx([0.0, 0.0, -1.62])
+    assert overridden["gravity"] == pytest.approx([0.0, 0.0, -9.81])
+
+
 def test_the_exporter_needs_a_shape_or_an_assembly(export_mjcf, tmp_path):
     with pytest.raises(ValueError, match="needs a shape or an assembly"):
         export_mjcf.process(str(tmp_path / "x.xml"), {"wrapped": "not a shape"})

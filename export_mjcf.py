@@ -43,6 +43,16 @@ arrangement does not say them and a *simulation* needs all three:
     exporter's ``sun`` and ``ground_plane`` are. The plane is a ``<geom>`` of
     the ``<worldbody>`` itself, so it is static whatever ``static`` says.
 
+What the scene says about its *world* it says to this exporter in
+``request["world"]``, when it says anything (see 'wrappers/wrapper_export.py' in
+PartCAD itself): the gravity, in m/s^2, and the fluid it is filled with, as the
+material's density (kg/m^3) and dynamic viscosity (Pa*s). They go into
+``<option>`` as they arrive -- ``gravity``, ``density`` and ``viscosity`` are
+in those units in MJCF too -- which turns on MuJoCo's passive fluid model, and
+the fluid's density also becomes each body's buoyancy (see 'write_buoyancy'). A
+scene that states neither gets exactly the ``<option>`` it always got. See the
+note above 'FLUID_INTEGRATOR' for what MuJoCo's model of a fluid is and is not.
+
 Two conventions are shared with the other two exporters and are what makes the
 round trip close: meshes are written in millimetres -- the unit PartCAD uses
 everywhere -- and referenced with ``scale="0.001 0.001 0.001"``, which is how
@@ -91,6 +101,56 @@ import urdf_common  # noqa: E402
 # millimetres and MJCF reads mesh coordinates as metres after scaling.
 MESH_SCALE = 1.0 / urdf_common.MM_PER_M
 
+# MuJoCo's own gravity, written when nothing states another: the scene, the
+# 'gravity' option of this export, and a 'simulate:' that passes one to the
+# simulation (which applies it over the file) all win over it, in the reverse of
+# that order. Earth's, along -Z, which is what every scene meant before a scene
+# could say anything else -- and spelled out rather than left out of the file, so
+# that a model opened on its own says which way is down.
+DEFAULT_GRAVITY = (0.0, 0.0, -9.81)
+
+# What MuJoCo makes of a fluid, so that nobody has to find out from a result.
+#
+# Setting ``<option density viscosity>`` turns on MuJoCo's *passive fluid
+# model*, and the default flavour of it is the inertia-box one: each body is
+# taken to be the box with its mass and inertia, and the fluid pushes back on it
+# with a drag quadratic in its velocity (from the density) and a Stokes
+# resistance linear in it (from the viscosity), and with the matching torques.
+# That is all. In particular:
+#
+#   * **No buoyancy.** MuJoCo's fluid model is drag and nothing else, so a block
+#     of foam sinks in its water as steadily as a block of lead, only slower. So
+#     this exporter adds the buoyancy itself, through MuJoCo's own ``gravcomp``:
+#     an upward force on a body's centre of mass of that fraction of its weight,
+#     which MuJoCo documents as "a buoyancy effect" when above one. The fraction
+#     is the mass of the fluid the body displaces over the body's own mass --
+#     Archimedes, scaled by whatever gravity the run ends up with, so a
+#     'gravity' override moves the buoyancy with it. Neither is worked out here:
+#     the body's mass is the one PartCAD resolved and 'mass_properties.of_body()'
+#     put on its '<inertial>', and what it displaces is the volume PartCAD
+#     measured its solids to enclose, added up by 'mass_properties.volume_of()'.
+#   * **No surface.** The fluid fills the whole world. A body lighter than it
+#     rises for ever, at the speed its drag allows, rather than coming to float
+#     at a waterline: there is no waterline. A scene with a surface is a
+#     different model, and Gazebo's graded buoyancy is the nearest thing to one.
+#   * **The centre of mass, not the centre of buoyancy.** ``gravcomp`` pushes
+#     where gravity pulls, so a body of one material -- whose two centres
+#     coincide -- is right, and one of several, whose buoyancy would right it, is
+#     not given that moment.
+#   * **Displaced volume is the solid's.** A sealed hollow part is buoyed by the
+#     material it is made of, as if flooded. A float is drawn as the solid it
+#     displaces and states its own mass.
+#   * **No added mass, lift or Magnus effect.** Those are MuJoCo's other,
+#     per-geom model (``fluidshape="ellipsoid"``), built for insect flight and
+#     tuned per geom with five coefficients nothing in a PartCAD scene states.
+#     It is not written: a model that needs it is a model somebody tunes by hand.
+#
+# MuJoCo recommends an implicit integrator wherever these velocity-dependent
+# forces act, so a model with a fluid in it is written with
+# ``integrator="implicitfast"``. One with none keeps MuJoCo's default, and every
+# existing model the bytes it had.
+FLUID_INTEGRATOR = "implicitfast"
+
 # MJCF names end up as XML attributes and are referenced by name from geoms and
 # from the simulation's own output, so anything outside this set is replaced.
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -110,7 +170,13 @@ GEOM_PHYSICS = {
 # image of the reader reporting what it cannot keep. 'density' is the geom's own
 # attribute of that name, written where MuJoCo has to weigh a mesh itself, and
 # otherwise what the '<inertial>' PartCAD worked out was worked out from.
-MJCF_STATED = frozenset(("mass", "centerOfMass", "inertiaOrientation", "inertia", "density", "friction", "restitution"))
+#
+# 'volume' is not a property MJCF states either, and is not one a part states:
+# it is what PartCAD measured the solid to enclose, and it goes into the model
+# as what the body displaces of the scene's fluid (see 'write_buoyancy').
+MJCF_STATED = frozenset(
+    ("mass", "centerOfMass", "inertiaOrientation", "inertia", "density", "volume", "friction", "restitution")
+)
 
 
 def _solref_for_restitution(restitution):
@@ -197,6 +263,38 @@ def write_mesh(shape, path, options):
     writer.ASCIIMode = options["ascii"]
     if not writer.Write(shape, path) or not os.path.exists(path) or os.path.getsize(path) == 0:
         raise Exception("Failed to write the mesh file: %s" % path)
+
+
+def write_buoyancy(body, inertial, parts, state):
+    """Buoy 'body' up with the weight of the fluid it displaces, as MuJoCo's ``gravcomp``.
+
+    'inertial' is the mass properties the body was just written with -- what
+    'mass_properties.of_body()' made of what PartCAD resolved -- and 'parts' the
+    same (physics, placement) pairs it was made from, which carry the volume
+    PartCAD measured each solid to enclose. The fraction is the mass of the
+    fluid displaced over the body's own: 'mass_properties.mass_of()' of the
+    body's volume at the fluid's density, over the body's mass. Nothing is
+    measured or weighed here, so the buoyancy and the '<inertial>' are of one
+    body and cannot disagree about it.
+
+    Nothing is written for a scene with no fluid. A body PartCAD could not weigh
+    (no '<inertial>', so MuJoCo weighs the mesh itself) or whose volume is not
+    known -- an open mesh, a shell -- is given none, and that is reported: a
+    body buoyed by a guess floats or sinks for no reason anybody could find.
+    """
+    fluid = state["fluid_density"]
+    if not fluid:
+        return
+    volume = mass_properties.volume_of(parts)
+    mass = inertial.get("mass") if inertial else None
+    if volume is None or not mass:
+        state["warnings"].append(
+            "%s has no %s PartCAD could resolve, so it is given no buoyancy in the fluid the scene is filled with"
+            % (body.get("name"), "mass" if volume is not None else "enclosed volume")
+        )
+        return
+    displaced = mass_properties.mass_of(volume, fluid)
+    body.set("gravcomp", mujoco_common.format_numbers([displaced / float(mass)], 6))
 
 
 def mesh_asset(shape, node, body_name, state):
@@ -361,11 +459,8 @@ def emit_body(parent, node, pose, elements, children_present, state):
     # where the body holds it -- unless the body states its own mass, which
     # beats the sum of its pieces. See 'mass_properties.of_body()' in PartCAD.
     own = None if len(elements) == 1 and elements[0][0] is node else physics
-    inertial = carried_inertial(
-        mass_properties.of_body(
-            [(physics_of(shape_node, state), placement) for _, shape_node, placement, _ in shapes], own=own
-        )
-    )
+    parts = [(physics_of(shape_node, state), placement) for _, shape_node, placement, _ in shapes]
+    inertial = carried_inertial(mass_properties.of_body(parts, own=own))
     if inertial is not None:
         write_inertial(body, inertial)
 
@@ -379,6 +474,8 @@ def emit_body(parent, node, pose, elements, children_present, state):
         asset_name = mesh_asset(shape, shape_node, body_name, state)
         emit_geom(body, shape_node, placement, asset_name, physics, inertial is not None, state, index)
         written += 1
+    if written:
+        write_buoyancy(body, inertial, parts, state)
 
     if not written and not children_present:
         # A frame with nothing in it and nothing under it. MuJoCo accepts an
@@ -443,6 +540,42 @@ def add_light(worldbody):
     light.set("specular", "0.2 0.2 0.2")
 
 
+def gravity_of(request, world):
+    """The gravity to write, in m/s^2: this export's own option, the scene's, or MuJoCo's.
+
+    An explicit 'gravity' on this export -- one a package configured on the
+    file type, or one passed on the command line -- is a decision about this
+    file and wins. Otherwise the scene's, which is what the scene says about its
+    world. Otherwise 'DEFAULT_GRAVITY'. This package's own declaration states
+    none, deliberately: a default there would be "explicit" too and would
+    override every scene that ever stated one.
+    """
+    gravity = request.get("gravity") or world.get("gravity") or DEFAULT_GRAVITY
+    return [float(v) for v in gravity]
+
+
+def write_medium(option, medium):
+    """State the scene's fluid on ``<option>``, and return its density in kg/m^3 (or None).
+
+    'medium' is what PartCAD resolved the scene's material to: 'density' in
+    kg/m^3 and 'viscosity' in Pa*s, each present only when the material states
+    it -- the units MJCF states them in, so they are written as they arrive. A
+    positive value of either turns MuJoCo's passive fluid forces on (see the note
+    above 'FLUID_INTEGRATOR'), and an empty one leaves ``<option>`` exactly as a
+    scene in a vacuum has always had it.
+    """
+    density = medium.get("density")
+    viscosity = medium.get("viscosity")
+    fluid_density = float(density) if density else None
+    if fluid_density:
+        option.set("density", mujoco_common.format_numbers([fluid_density], 6))
+    if viscosity:
+        option.set("viscosity", mujoco_common.format_numbers([float(viscosity)], 6))
+    if fluid_density or viscosity:
+        option.set("integrator", FLUID_INTEGRATOR)
+    return fluid_density
+
+
 def process(path, request):
     root = request["wrapped"]
     if not isinstance(root, dict) or not (
@@ -468,10 +601,12 @@ def process(path, request):
     # is a quaternion anyway.
     compiler = ElementTree.SubElement(mujoco, "compiler")
     compiler.set("angle", "radian")
+    world = request.get("world") or {}
     option = ElementTree.SubElement(mujoco, "option")
-    option.set("gravity", mujoco_common.format_numbers(request.get("gravity") or (0.0, 0.0, -9.81), 6))
+    option.set("gravity", mujoco_common.format_numbers(gravity_of(request, world), 6))
     if request.get("timestep"):
         option.set("timestep", mujoco_common.format_numbers([request["timestep"]], 6))
+    fluid_density = write_medium(option, world.get("medium") or {})
     asset = ElementTree.SubElement(mujoco, "asset")
     worldbody = ElementTree.SubElement(mujoco, "worldbody")
 
@@ -489,6 +624,9 @@ def process(path, request):
         # rather than being recomputed.
         "properties": request.get("properties") or {},
         "unsupported": set(),
+        # The scene's fluid's density, in kg/m^3, or None in a vacuum. See
+        # 'write_buoyancy'.
+        "fluid_density": fluid_density,
         "options": {
             "tolerance": request.get("tolerance", 0.1),
             "angularTolerance": request.get("angularTolerance", 0.1),

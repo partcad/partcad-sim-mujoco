@@ -8,7 +8,9 @@
 Runs a scene under gravity for a while and says where everything ended up.
 
 The scene arrives as MJCF -- PartCAD exported it, with every body free to move
-and a ground plane under it -- so all this does is load the model, step it, and
+and a ground plane under it, under the scene's gravity and in the fluid the
+scene is filled with, if it says either -- so all this does is load the model,
+step it, and
 take the same reading twice: once before anything has moved and once when the
 time is up. That pair is what a ``simulate:``'s ``validation:`` expression is
 handed, and it is the whole of what PartCAD requires a simulation plugin to
@@ -167,8 +169,14 @@ def process(path, request):
         model.opt.timestep = float(timestep)
     gravity = request.get("gravity")
     if gravity:
-        # The exported MJCF already carries it; honouring it here too means a
-        # 'simulate:' can ask for a different gravity without re-exporting.
+        # The exported model already carries the scene's gravity, or MuJoCo's
+        # own when the scene states none. This is only here when the 'simulate:'
+        # that asked for the run passed one in 'params' -- this package's
+        # declaration deliberately states no default, because a default here
+        # would override every scene's -- and it is the explicit, per-run answer
+        # that beats the scene's. A body's buoyancy is a fraction of its weight
+        # ('gravcomp'), so it follows the new gravity without anything else
+        # being rewritten.
         model.opt.gravity[:] = [float(v) for v in gravity]
 
     data = mujoco.MjData(model)
@@ -213,6 +221,11 @@ def process(path, request):
         "gravity": [float(v) for v in model.opt.gravity],
         "units": "mm",
     }
+    if model.opt.density > 0 or model.opt.viscosity > 0:
+        # The fluid the scene was filled with, as MuJoCo ran it: kg/m^3 and Pa*s,
+        # MuJoCo's own units, the way 'gravity' beside it is in m/s^2. Left out
+        # for a run in a vacuum, which is what a result has always meant.
+        result["medium"] = {"density": float(model.opt.density), "viscosity": float(model.opt.viscosity)}
     if trace:
         result["samples"] = trace
     drawn = take_snapshots(path, pictures, looks, warnings)
