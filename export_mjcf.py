@@ -151,6 +151,24 @@ DEFAULT_GRAVITY = (0.0, 0.0, -9.81)
 # existing model the bytes it had.
 FLUID_INTEGRATOR = "implicitfast"
 
+# How MuJoCo resolves friction, written into every model unless an export
+# says otherwise ('cone', 'impratio', 'noslip_iterations'; null leaves
+# MuJoCo's own).
+#
+# MuJoCo's contacts are soft: a contact under a steady sideways load slips at a
+# small steady rate even when the load is well inside the friction cone, and
+# with MuJoCo's defaults -- pyramidal cones, an impratio of one, no NoSlip pass
+# -- that rate is not small. Two 20 mm aluminium cubes (mu 1.05) stacked in a
+# world tilted by 6 degrees, where tan(6 deg) = 0.105 says nothing should move,
+# slid 33 mm in ten seconds and the top one fell off. Elliptic cones and an
+# impratio of ten -- what MuJoCo's own documentation recommends against slow
+# slippage -- bring that to about a millimetre, and three NoSlip iterations
+# (its stronger remedy) to under half a millimetre at 15 degrees, while a top
+# block whose friction is below tan(15 deg) still slides off within a second.
+# Without these, whether a stack "stands" is a question about the solver rather
+# than about the material it is made of.
+CONTACT_DEFAULTS = {"cone": "elliptic", "impratio": 10, "noslip_iterations": 3}
+
 # MJCF names end up as XML attributes and are referenced by name from geoms and
 # from the simulation's own output, so anything outside this set is replaced.
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -554,6 +572,20 @@ def gravity_of(request, world):
     return [float(v) for v in gravity]
 
 
+def write_contact(option, request):
+    """State how MuJoCo resolves friction, from the export's options or 'CONTACT_DEFAULTS'.
+
+    An option set to null in a package's export configuration -- or passed as
+    None -- leaves MuJoCo's own value, which is how a model that relies on the
+    pyramidal cones gets them back.
+    """
+    for name, default in CONTACT_DEFAULTS.items():
+        value = request.get(name, default)
+        if value is None:
+            continue
+        option.set(name, value if isinstance(value, str) else mujoco_common.format_numbers([value], 6))
+
+
 def write_medium(option, medium):
     """State the scene's fluid on ``<option>``, and return its density in kg/m^3 (or None).
 
@@ -606,6 +638,7 @@ def process(path, request):
     option.set("gravity", mujoco_common.format_numbers(gravity_of(request, world), 6))
     if request.get("timestep"):
         option.set("timestep", mujoco_common.format_numbers([request["timestep"]], 6))
+    write_contact(option, request)
     fluid_density = write_medium(option, world.get("medium") or {})
     asset = ElementTree.SubElement(mujoco, "asset")
     worldbody = ElementTree.SubElement(mujoco, "worldbody")

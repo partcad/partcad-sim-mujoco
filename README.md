@@ -142,15 +142,26 @@ of one `simulate:` entry (per simulation).
 ## Friction is a fact about the material
 
 Whether a stack of blocks stands up is not a property of its geometry. Two 20 mm
-cubes squarely stacked, ten seconds under gravity, nothing changed but the
-coefficient the blocks are given:
+cubes, one squarely on the other, in a world whose gravity is
+tilted 15° off vertical -- a ramp with no edge to slide off, `tan 15° = 0.268`
+-- for ten seconds, nothing changed but the sliding coefficient both blocks are
+given (measured with this package's exporter and simulation):
 
 | sliding friction | what happens to the top block |
 | --- | --- |
-| 0.04 (PTFE) | slides off and ends up on the floor — 35 mm |
-| 0.4 | the same |
-| 0.5 | it stays — 3 mm of settling |
-| 1.05 (dry aluminium) | it stays — 1 mm |
+| 0.04 (PTFE) | slides 69 mm and falls 20 mm, onto the floor |
+| 0.1 | slides 63 mm and falls |
+| 0.2 | slides 56 mm and falls |
+| 0.25 | slides 32 mm and falls |
+| 0.28 | slides 34 mm and falls |
+| 0.3 | stays: 0.5 mm of creep, 0.4 mm of settling |
+| 0.4 | stays: 0.5 mm |
+| 1.05 (dry aluminium) | stays: 0.5 mm |
+
+On a level floor every one of them stays put, PTFE included: nothing pushes a
+block sideways, so its friction is never asked anything. The threshold MuJoCo
+finds, between 0.28 and 0.3, is a little above `tan 15°` because its contacts
+are soft; see below.
 
 So state it. A part that declares a material whose `mu` is set gets that
 coefficient written into the MJCF, and the simulation answers for the material
@@ -158,8 +169,37 @@ the part is actually made of. A part that states neither gets MuJoCo's default
 of 1.0 — a plausible number for metal on metal, a badly wrong one for PTFE, and
 in either case a number nobody chose.
 
-PartCAD writes each body's own coefficient and says nothing about how the two
-sides of a contact combine: that is MuJoCo's model rather than the part's.
+### How MuJoCo combines the two sides of a contact
+
+MuJoCo takes the **element-wise maximum** of the two geoms' friction
+coefficients, unless one geom has a higher `priority`, in which case its
+coefficients are used ([Contact
+parameters](https://mujoco.readthedocs.io/en/stable/modeling.html#contact-parameters)).
+This exporter sets no priority, so:
+
+* **block on block** -- two parts of one material meet at that material's
+  `mu`; two of different materials at the larger of the two;
+* **block on floor** -- at no less than 1.0, because the ground plane states no
+  friction and so has MuJoCo's default. A PTFE block grips the floor; it is a
+  PTFE block on another PTFE block that slides.
+
+### Contacts that stick
+
+MuJoCo's contacts are soft, and a block under a steady sideways load slips at a
+small steady rate even when the load is well inside its friction cone. With
+MuJoCo's own defaults -- pyramidal cones, `impratio` 1, no NoSlip pass -- that
+rate is large: the same aluminium stack, which should not move at all, slid
+33 mm at a 6° tilt and lost its top block, and at 15° the bottom block slid
+18 mm along the floor too. So every model this package writes carries MuJoCo's
+own remedies ("Preventing slip" in its modelling guide):
+
+```xml
+<option cone="elliptic" impratio="10" noslip_iterations="3" />
+```
+
+which hold the aluminium stack to the half-millimetre of creep in the table
+above. They are export parameters (`cone`, `impratio`, `noslip_iterations` on
+`mjcf`); set one to null for MuJoCo's own value.
 
 ## So is what it weighs
 

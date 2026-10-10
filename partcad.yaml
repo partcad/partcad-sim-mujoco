@@ -83,9 +83,18 @@ docs:
     ### Friction is a fact about the material, not about MuJoCo
 
     Whether a stack of blocks stands up is not a property of its geometry. Two
-    20 mm cubes squarely stacked stay put at a sliding friction of 0.5 and the
-    top one slides off at 0.4, and nothing about the arrangement changes in
-    between.
+    20 mm cubes squarely stacked in a world tilted by 15 degrees stay put at a
+    sliding friction of 0.3 and the top one slides off at 0.28 -- tan(15 deg)
+    is 0.268 -- and nothing about the arrangement changes in between.
+
+    Two things decide what "the friction" of a contact is. MuJoCo takes the
+    **larger** of the two geoms' coefficients (unless one has a higher
+    `priority`, which nothing here sets), so two blocks of one material meet at
+    that material's `mu`, and a block on the floor meets it at no less than the
+    floor's: the ground plane states none and so has MuJoCo's default of 1.0.
+    And MuJoCo's contacts are soft, so a block under a steady sideways load
+    creeps unless the model says how hard to hold it -- which is what the
+    `cone`, `impratio` and `noslip_iterations` this package writes are for.
 
     So state it. A part that declares a `material:` whose material states `mu`
     gets that coefficient written into the MJCF, and the simulation answers for
@@ -223,6 +232,17 @@ export:
     # mesh_dir: <directory>
     # density: 2700.0
     # timestep: 0.002
+    #
+    # How MuJoCo resolves friction. MuJoCo's contacts are soft, and with its own
+    # defaults -- pyramidal cones, an impratio of one, no NoSlip pass -- a block
+    # under a steady sideways load creeps: two aluminium cubes stacked in a world
+    # tilted by 6 degrees slid apart in ten seconds although their friction is ten
+    # times what holds them. These are MuJoCo's own remedies for that ("Preventing
+    # slip" in its modelling guide), and with them a stack holds or slides off as
+    # its friction says it should. Set one to null for MuJoCo's own value.
+    cone: elliptic
+    impratio: 10
+    noslip_iterations: 3
     #
     # 'gravity' (m/s^2) is not given a default here, and that is the point of
     # leaving it commented out. The gravity of a scene is the scene's to state
