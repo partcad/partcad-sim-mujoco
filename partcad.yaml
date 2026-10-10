@@ -130,8 +130,10 @@ export:
     desc: |
       MJCF, the XML MuJoCo describes a model in: an `.xml` file plus the mesh
       files it references. It is the format a scene or an assembly is handed to
-      a MuJoCo simulation in, and it is what `pc ide open --with mujoco`
-      converts a scene to before opening it.
+      a MuJoCo simulation in, and the only one `pc ide open --with mujoco`
+      opens: a scene in any other format is refused rather than converted,
+      and this export is how to get one MuJoCo can open
+      (`pc export -S -t sim-mujoco:mjcf`).
 
       It is handed the assembly *tree* itself rather than the geometry it
       decodes to (`decode: false`) -- one body per object placed in the scene,
@@ -290,7 +292,15 @@ open:
     macosApps: [MuJoCo.app]
     macosExecutable: Contents/MacOS/simulate
     windowsGlobs: ["MuJoCo*/bin/simulate.exe", "mujoco*/bin/simulate.exe"]
-    # MuJoCo reads MJCF and no other model format. A scene given as anything
-    # else -- a Gazebo world, above all -- is written out as MJCF first, which
-    # is `pc export -t mjcf` and so is the daemon's work.
+    # MuJoCo reads MJCF and no other model format, and `pc ide open` does not
+    # convert a scene into it: MJCF is written by this package's exporter, and
+    # a file handed to `pc ide open` has no package around it to reach that
+    # through. So it opens a file that already is MJCF -- one stored under an
+    # extension below, or declared `type: sim-mujoco:mjcf` -- and refuses
+    # anything else, a Gazebo world above all, pointing at the export that
+    # writes one: `pc export -S -t sim-mujoco:mjcf`.
     sceneType: mjcf
+    # What a file of `sceneType` is called on disk. Without it a model is MJCF
+    # only when its declared type says so, and `pc ide open --with mujoco
+    # stack.xml` is refused.
+    sceneExtensions: [".xml", ".mjcf"]
