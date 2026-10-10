@@ -885,7 +885,7 @@ def test_a_scene_that_states_no_world_gets_the_option_it_always_got(export_mjcf,
     _result, mujoco = exported(export_mjcf, tmp_path / "a.xml", one_cube(), properties=resolved(ALUMINIUM_CUBE))
 
     option = mujoco.find("option")
-    assert option.attrib == {"gravity": "0 0 -9.81"}
+    assert option.attrib == {"gravity": "0 0 -9.81", "cone": "elliptic", "impratio": "10", "noslip_iterations": "3"}
     assert mujoco.find("worldbody/body").get("gravcomp") is None
 
 
@@ -1070,6 +1070,125 @@ def test_a_gravity_the_simulation_is_handed_beats_the_one_in_the_model(tmp_path)
 
     assert as_written["gravity"] == pytest.approx([0.0, 0.0, -1.62])
     assert overridden["gravity"] == pytest.approx([0.0, 0.0, -9.81])
+
+
+#
+# Friction: how the two sides of a contact combine, and contacts that stick
+#
+
+
+def test_every_model_says_how_hard_its_contacts_hold(export_mjcf, tmp_path):
+    """MuJoCo's own remedies for slow slippage, unless the export says otherwise."""
+    _result, mujoco = exported(export_mjcf, tmp_path / "a.xml", one_cube())
+    option = mujoco.find("option")
+    assert (option.get("cone"), option.get("impratio"), option.get("noslip_iterations")) == ("elliptic", "10", "3")
+
+    _result, mujoco = exported(
+        export_mjcf, tmp_path / "b.xml", one_cube(), cone=None, impratio=None, noslip_iterations=None
+    )
+    assert mujoco.find("option").attrib == {"gravity": "0 0 -9.81"}
+
+
+def test_this_package_declares_the_contact_settings_it_writes():
+    with open(os.path.join(HERE, "partcad.yaml"), encoding="utf-8") as f:
+        declared = yaml.safe_load(f)["export"]["mjcf"]
+
+    assert {name: declared[name] for name in export_mjcf_module().CONTACT_DEFAULTS} == (
+        export_mjcf_module().CONTACT_DEFAULTS
+    )
+
+
+def export_mjcf_module():
+    import export_mjcf as module
+
+    return module
+
+
+def tilted_stack(export_mjcf, monkeypatch, tmp_path, name, mu, tilt=15.0, floor=None, **options):
+    """Two 10 mm cubes, one on the other, at 'mu', in a world tilted by 'tilt' degrees.
+
+    What MuJoCo did with them for three seconds: how far each moved, in mm.
+    """
+    import math
+    import shutil
+
+    import simulate_mujoco
+
+    monkeypatch.setattr(export_mjcf, "write_mesh", lambda shape, path, options: shutil.copyfile(STL_EXAMPLE, path))
+    root = {
+        "name": "//p:stack",
+        "label": "stack",
+        "assembly": [
+            envelope("//p:block", "bottom", b"CUBE", [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
+            envelope("//p:block", "top", b"CUBE", [[0.0, 0.0, 10.0], [0.0, 0.0, 1.0], 0.0]),
+        ],
+    }
+    moment = 0.0027 * 0.01**2 / 6.0
+    physics = {
+        "friction": mu,
+        "volume": 1000.0,
+        "mass": 0.0027,
+        "centerOfMass": [5.0, 5.0, 5.0],
+        "inertia": {"ixx": moment, "iyy": moment, "izz": moment, "ixy": 0.0, "ixz": 0.0, "iyz": 0.0},
+    }
+    angle = math.radians(tilt)
+    path = tmp_path / name
+    exported(
+        export_mjcf,
+        path,
+        root,
+        flatten=True,
+        static=False,
+        properties={"//p:block": {"physics": physics}},
+        world={"gravity": [9.81 * math.sin(angle), 0.0, -9.81 * math.cos(angle)]},
+        **options,
+    )
+    if floor is not None:
+        text = path.read_text(encoding="utf-8").replace('condim="3"', 'condim="3" friction="%g 0.005 0.0001"' % floor)
+        path.write_text(text, encoding="utf-8")
+    result = simulate_mujoco.process(str(tmp_path), {"scene_file": str(path), "duration": 3.0})
+    before, after = result["before"]["bodies"], result["after"]["bodies"]
+    return {body: [a - b for a, b in zip(after[body]["pos"], before[body]["pos"])] for body in before}
+
+
+def test_a_stack_holds_or_slides_as_its_friction_says(export_mjcf, monkeypatch, tmp_path):
+    """tan(15 deg) is 0.268: dry aluminium holds by a factor of four, PTFE slides by one of six."""
+    pytest.importorskip("mujoco")
+
+    held = tilted_stack(export_mjcf, monkeypatch, tmp_path, "aluminium.xml", 1.05)
+    slid = tilted_stack(export_mjcf, monkeypatch, tmp_path, "ptfe.xml", 0.04)
+
+    assert max(abs(v) for v in held["top"]) < 1.0
+    # Slid off the bottom block and fell its height onto the floor.
+    assert slid["top"][2] < -9.0
+    # While the bottom block, on the floor, held: see the next test.
+    assert abs(slid["bottom"][0]) < 1.0
+
+
+def test_without_the_contact_settings_even_aluminium_creeps(export_mjcf, monkeypatch, tmp_path):
+    """Why they are written: MuJoCo's defaults let a stack well inside its friction cone slide apart."""
+    pytest.importorskip("mujoco")
+
+    crept = tilted_stack(
+        export_mjcf, monkeypatch, tmp_path, "pyramidal.xml", 1.05, cone=None, impratio=None, noslip_iterations=None
+    )
+
+    assert crept["bottom"][0] > 2.0
+
+
+def test_a_contact_uses_the_larger_of_the_two_frictions(export_mjcf, monkeypatch, tmp_path):
+    """MuJoCo's rule, absent priorities: a PTFE block grips a floor that states MuJoCo's default 1.0.
+
+    And on a floor that states less than the block, the block's own friction
+    is the one that decides -- here, that it slides along the floor too.
+    """
+    pytest.importorskip("mujoco")
+
+    gripping = tilted_stack(export_mjcf, monkeypatch, tmp_path, "default-floor.xml", 0.04)
+    slippery_floor = tilted_stack(export_mjcf, monkeypatch, tmp_path, "low-floor.xml", 0.04, floor=0.0)
+
+    assert abs(gripping["bottom"][0]) < 1.0
+    assert slippery_floor["bottom"][0] > 5.0
 
 
 def test_the_exporter_needs_a_shape_or_an_assembly(export_mjcf, tmp_path):
