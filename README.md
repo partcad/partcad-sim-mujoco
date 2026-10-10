@@ -136,7 +136,7 @@ of one `simulate:` entry (per simulation).
 | --- | --- | --- |
 | `duration` | `10.0` | Seconds of simulated time to run for. |
 | `timestep` | MuJoCo's | Integration step, in seconds. |
-| `gravity` | `[0, 0, -9.81]` | m/s², in the scene's frame. |
+| `gravity` | the scene's | m/s², in the scene's frame. Overrides the scene's `gravity:` for this run; unset, the run is under the scene's, or MuJoCo's `[0, 0, -9.81]` when the scene states none. |
 | `samples` | `0` | Report the state at this many evenly spaced instants too, as `samples`. |
 
 ## Friction is a fact about the material
@@ -184,6 +184,73 @@ integrates the mesh at it.
 
 It needs the PartCAD that does this, and says so: `partcad:` in `partcad.yaml`
 makes an older one refuse the package.
+
+## Gravity, and the fluid a scene is filled with
+
+A PartCAD scene may say what its world is like, beside where things are in it:
+
+```yaml
+scenes:
+  tank:
+    type: assy
+    gravity: [0, 0, -9.81]                                # m/s², the scene's own frame
+    medium: //pub/std/manufacturing/material/fluid:water  # a material, by reference
+```
+
+PartCAD resolves the material and hands this exporter its density and
+viscosity. Every one of these is SI in PartCAD and in MJCF alike, so nothing is
+converted on the way:
+
+| The scene says | The MJCF says |
+| --- | --- |
+| `gravity` (m/s²) | `<option gravity>` (m/s²) |
+| the medium's `density` (kg/m³) | `<option density>` (kg/m³) |
+| the medium's `viscosity` (Pa·s) | `<option viscosity>` (Pa·s) |
+| the medium's `density` again | each body's `gravcomp`: ρ_fluid · V / m |
+
+`m` is the mass on the body's `<inertial>`, which PartCAD resolved, and `V` the
+volume PartCAD measured the body's solids to enclose, handed over beside it and
+added up by PartCAD's `mass_properties.volume_of()`; the displaced mass is
+`mass_properties.mass_of(V, ρ_fluid)`. This exporter measures and weighs
+nothing itself. A body PartCAD could not weigh, or whose volume it does not know
+(an open mesh), gets no buoyancy, and a warning says which.
+
+A model with a fluid in it is also written with `integrator="implicitfast"`,
+which is what MuJoCo recommends wherever velocity-dependent forces act. A scene
+that states neither gets exactly the `<option>` it always did — MuJoCo's own
+gravity, in a vacuum.
+
+**What MuJoCo models, and what it does not.** `<option density viscosity>` turns
+on MuJoCo's [passive fluid model](https://mujoco.readthedocs.io/en/stable/computation/fluid.html)
+in its default, *inertia-box* form: each body is taken to be the box with its
+mass and inertia, and the fluid resists its motion with a drag quadratic in its
+speed (from the density) and a Stokes resistance linear in it (from the
+viscosity), with the matching torques. That model has **no buoyancy** at all —
+a block of foam would sink, only slower — so this package adds it, through
+MuJoCo's own `gravcomp`: an upward force at the body's centre of mass of that
+fraction of its weight, which MuJoCo's documentation calls "a buoyancy effect"
+when it is above one. The fraction is the fluid displaced over the body's own
+mass, so it follows any `gravity` a run is given. What that leaves out:
+
+* **A surface.** The fluid fills the whole world. A body lighter than it rises
+  for as long as the run lasts, at the speed its drag allows, rather than coming
+  to float at a waterline.
+* **The centre of buoyancy.** The force acts at the centre of mass. For a body
+  of one material the two coincide; for one of several, the righting moment a
+  real body would feel is missing.
+* **Sealed cavities.** The volume displaced is the solid's, so a hollow part is
+  buoyed as if flooded. A float is drawn as the solid it displaces, and states
+  its own `mass`; PartCAD scales the solid's inertia to it.
+* **Added mass, lift and the Magnus effect.** Those are MuJoCo's per-geom
+  *ellipsoid* model (`fluidshape="ellipsoid"`), which needs five coefficients
+  per geom that nothing in a PartCAD scene states. It is not written.
+
+**Which gravity wins.** In order: a `simulate:`'s own `params: {gravity: ...}`,
+for that run; the scene's `gravity:`; MuJoCo's `[0, 0, -9.81]`. An explicit
+`gravity` on the `mjcf` export does the same for a file written with
+`pc export`. Neither this package's export nor its simulation states a default
+of its own any more — until PartCAD scenes could say anything, a default there
+was harmless, and now it would beat every scene that does.
 
 ## Tests
 

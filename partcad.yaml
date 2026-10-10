@@ -43,8 +43,10 @@ desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 # ships 'mass_properties' in its sandbox contract, which the MJCF writer adds a
 # body's shapes up with. An older PartCAD hands it parts with no mass worked out
 # and no helper to add them up with, and refuses this package rather than write
-# a model of weightless bodies.
-# TODO: set to the release partcad/partcad#755 lands in, if that is not this one.
+# a model of weightless bodies. The same release hands it a scene's gravity
+# and fluid, and each shape's measured volume, which the buoyancy is worked out
+# from (partcad/partcad#757).
+# TODO: set to the release partcad/partcad#755 and #757 land in, if that is not this one.
 partcad: ">=0.8.169"
 
 docs:
@@ -96,6 +98,28 @@ docs:
     what aluminium does. A part that states its own `mass` keeps it; one that
     names no material is weighed at the export's `density`, which is
     aluminium's unless it says otherwise.
+
+    ### Gravity, and the fluid a scene is filled with
+
+    A scene may state its `gravity:` (m/s^2) and the `medium:` it is filled
+    with, as a material -- `//pub/std/manufacturing/material/fluid:water`. The
+    gravity goes into `<option gravity>`; the fluid's density and viscosity
+    into `<option density viscosity>`, which turns on MuJoCo's passive fluid
+    model, and its density into each body's buoyancy, as MuJoCo's `gravcomp`.
+    A scene that states neither runs under MuJoCo's own gravity in a vacuum,
+    exactly as before.
+
+    MuJoCo's fluid is drag and nothing else: quadratic in speed from the
+    density, linear from the viscosity, about each body's equivalent inertia
+    box. The buoyancy is this package's addition, and it is Archimedes with no
+    surface -- the fluid fills the whole world, so a body lighter than it rises
+    for as long as the run lasts rather than coming to float, and it is pushed
+    up at its centre of mass. Added mass and lift are not modelled.
+
+    The gravity a run uses is, in order: `params: {gravity: ...}` on the
+    `simulate:`, the scene's, then MuJoCo's `[0, 0, -9.81]`. Neither the export
+    nor the simulation below states one of its own any more, because a default
+    there would beat every scene.
   usage: |
     Import this package and name it from the sections that use it:
 
@@ -197,10 +221,20 @@ export:
     # mesh_dir: <directory>
     # density: 2700.0
     # timestep: 0.002
-    gravity: [0.0, 0.0, -9.81]
+    #
+    # 'gravity' (m/s^2) is not given a default here, and that is the point of
+    # leaving it commented out. The gravity of a scene is the scene's to state
+    # (`gravity:` on the scene), and a value set here would be an explicit
+    # override that beats every scene that ever stated one. Unset, the file gets
+    # the scene's gravity, or MuJoCo's own [0, 0, -9.81] when the scene states
+    # none -- which is what it always got.
+    # gravity: [0.0, 0.0, -9.81]
+    #
     # Hand the exporter what the parts report about themselves -- mass,
     # inertia, density, friction, colour, and what PartCAD worked out of what
-    # they are made of -- so that it writes those rather than losing them.
+    # they are made of -- so that it writes those rather than losing them. It
+    # is also what PartCAD hands a scene's world under: its gravity and the
+    # fluid it is filled with.
     properties: true
 
 import:
@@ -284,7 +318,14 @@ simulation:
     duration: 10.0
     # MuJoCo's own timestep unless this says otherwise, in seconds.
     # timestep: 0.002
-    gravity: [0.0, 0.0, -9.81]
+    #
+    # The gravity to run under, in m/s^2, over whatever the model says. No
+    # default, for the reason the exporter above has none: the model already
+    # carries the scene's gravity, and a default here would replace it in every
+    # run. A `simulate:` that wants another for one run says
+    # `params: {gravity: [0, 0, -1.62]}`, which beats the scene's.
+    # gravity: [0.0, 0.0, -9.81]
+    #
     # Report where every body is at each of these many evenly spaced instants,
     # as 'samples'. Zero -- the default -- reports only 'before' and 'after',
     # which is what a validation reads.
