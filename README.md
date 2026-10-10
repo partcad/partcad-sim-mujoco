@@ -161,6 +161,30 @@ in either case a number nobody chose.
 PartCAD writes each body's own coefficient and says nothing about how the two
 sides of a contact combine: that is MuJoCo's model rather than the part's.
 
+## So is what it weighs
+
+The same material says what the part weighs. PartCAD works out every part's
+mass, centre of mass and inertia -- what the part states, or else its solid at
+the density of what it is made of -- and hands them over with the part, so a
+body's `<inertial>` is exactly what `pc info` reports for it, and what the URDF
+and SDFormat exports of the same object say. A PTFE block weighs what PTFE
+weighs rather than what aluminium does. The order is:
+
+1. what the part states, as stated;
+2. its `density` -- one it states, or else its material's;
+3. the export's `density` parameter;
+4. 2700 kg/m³, aluminium.
+
+This exporter works none of that out. A body of several shapes -- two
+materials in one link -- is added up by PartCAD's `mass_properties`, the one
+copy of that arithmetic all three exporters share, so it balances where it
+should. A body PartCAD could not weigh, because its mesh has no solid in it, is
+left to MuJoCo: its geoms carry the density PartCAD resolved, and MuJoCo
+integrates the mesh at it.
+
+It needs the PartCAD that does this, and says so: `partcad:` in `partcad.yaml`
+makes an older one refuse the package.
+
 ## Tests
 
 ```shell
@@ -168,8 +192,10 @@ pytest
 ```
 
 `test_mjcf.py` needs `partcad` installed: the reader and the writer are written
-against the sandbox contract that lives there — `ocp_serialize`, `urdf_common`
-and `primitive_shapes` — and the tests import them the same way a sandbox does.
+against the sandbox contract that lives there — `ocp_serialize`, `urdf_common`,
+`mass_properties` and `primitive_shapes` — and the tests import them the same
+way a sandbox does. CI installs it from PartCAD's `devel` branch, so that a
+change to that contract fails here before it is released.
 It needs no MuJoCo, because reading and writing a model do not involve one.
 
 `test_snapshot.py` needs numpy for the pictures, and MuJoCo for the half that

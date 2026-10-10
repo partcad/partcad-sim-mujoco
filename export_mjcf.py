@@ -50,6 +50,17 @@ MJCF says "these coordinates are millimetres"; and geometry is written in its
 own frame and placed by the element that holds it, so a shape that appears more
 than once is written once and referenced by every geom that uses it.
 
+What a body weighs is what it is made of, and this exporter works none of it
+out. PartCAD hands every part over with its mass, centre of mass and inertia
+already resolved -- stated, or derived from its solid at the density of what it
+is made of (see 'partcad.physics' in PartCAD) -- and they go on the body's
+``<inertial>``, so a model MuJoCo runs weighs exactly what ``pc info`` says and
+what the URDF and SDFormat exports of the same object weigh. A body of several
+shapes is added up by PartCAD's own 'mass_properties', the one copy of that
+arithmetic all three exporters share. Only a body PartCAD could not weigh -- a
+mesh with no solid in it -- is left to MuJoCo, which integrates the mesh at the
+density PartCAD resolved for the part.
+
 Note that MuJoCo reads **binary** STL only, which is why ``ascii`` defaults to
 false here and an ``ascii: true`` is reported rather than quietly written.
 """
@@ -63,13 +74,15 @@ from xml.etree import ElementTree
 # Pinned before anything that may pull OCP - see the note in ocp_serialize.
 import pyexpat  # noqa: F401
 
-# 'mujoco_common' is this package's, and sits beside this file. The other two
+# 'mujoco_common' is this package's, and sits beside this file. The other three
 # are PartCAD's own and are the sandbox contract every implementation is written
 # against: 'ocp_serialize' is the shape and assembly envelope format this is
-# handed, and 'urdf_common' is the pose arithmetic they are stated in. A sandbox
-# runs a wrapper out of PartCAD's 'wrappers/' directory, so both are already on
-# sys.path by the time this is imported.
+# handed, 'urdf_common' is the pose arithmetic they are stated in, and
+# 'mass_properties' is how several shapes' inertias add up into one body's. A
+# sandbox runs a wrapper out of PartCAD's 'wrappers/' directory, so all three
+# are already on sys.path by the time this is imported.
 sys.path.append(os.path.dirname(__file__))
+import mass_properties  # noqa: E402
 import mujoco_common  # noqa: E402
 import ocp_serialize  # noqa: E402
 import urdf_common  # noqa: E402
@@ -77,12 +90,6 @@ import urdf_common  # noqa: E402
 # Metres per millimetre, for the mesh ``scale``: the meshes are written in
 # millimetres and MJCF reads mesh coordinates as metres after scaling.
 MESH_SCALE = 1.0 / urdf_common.MM_PER_M
-
-# Density used when a part does not state a mass, in kg/m^3. Aluminium, the
-# same default the URDF and world exporters use and for the same reason: a
-# middle-of-the-road value for a machined part, whose provenance is obvious in
-# the output rather than looking like a measurement.
-DEFAULT_DENSITY = 2700.0
 
 # MJCF names end up as XML attributes and are referenced by name from geoms and
 # from the simulation's own output, so anything outside this set is replaced.
@@ -100,8 +107,10 @@ GEOM_PHYSICS = {
 # Every part property this exporter has an MJCF spelling for. A 'physics'
 # property outside this set is one PartCAD supports and MJCF does not: it is
 # reported through the response and logged at info level, which is the mirror
-# image of the reader reporting what it cannot keep.
-MJCF_STATED = frozenset(("mass", "centerOfMass", "inertiaOrientation", "inertia", "friction", "restitution"))
+# image of the reader reporting what it cannot keep. 'density' is the geom's own
+# attribute of that name, written where MuJoCo has to weigh a mesh itself, and
+# otherwise what the '<inertial>' PartCAD worked out was worked out from.
+MJCF_STATED = frozenset(("mass", "centerOfMass", "inertiaOrientation", "inertia", "density", "friction", "restitution"))
 
 
 def _solref_for_restitution(restitution):
@@ -240,16 +249,16 @@ def shape_elements(node):
 
 
 def carried_inertial(physics):
-    """The ``<inertial>`` values a part states about itself, or None.
+    """The ``<inertial>`` values of a body, or None if it has no mass.
 
-    Only what the part actually says. Nothing is computed here, unlike in the
-    URDF and world exporters: MuJoCo computes a body's inertia from its geoms
-    and their density perfectly well, and an inertia tensor computed here and
-    rounded on the way out can fail MuJoCo's positive-definiteness check and
-    take the whole model with it. So a part that states its mass gets its mass,
-    and a part that does not gets the density instead (see 'emit_geom').
+    What PartCAD resolved -- a mass the part states, or the one its solid comes
+    to at its density, with the centre and the inertia that go with it -- so
+    nothing is computed here. The tensor is written to twelve significant
+    digits, and for anything with a solid in it is the integral of a real
+    distribution of mass, which is positive definite: the rounding that once
+    made computing one here risky is far below what MuJoCo's check can see.
     """
-    if "mass" not in physics:
+    if not physics or "mass" not in physics:
         return None
     values = {"mass": float(physics["mass"])}
     if "centerOfMass" in physics:
@@ -290,8 +299,19 @@ def write_inertial(body, values):
         inertial.set("diaginertia", mujoco_common.format_numbers([1e-6, 1e-6, 1e-6]))
 
 
-def emit_geom(body, shape_node, placement, asset_name, physics, state, index):
-    """Add one ``<geom>`` to a body, with what its part says about itself."""
+def physics_of(node, state):
+    """What PartCAD says about the physics of the part behind one node of the tree."""
+    return (state["properties"].get(node.get("name")) or {}).get("physics") or {}
+
+
+def emit_geom(body, shape_node, placement, asset_name, physics, weighed, state, index):
+    """Add one ``<geom>`` to a body, with what its part says about itself.
+
+    'weighed' says whether the body has an ``<inertial>``. One that has not is
+    one PartCAD could not weigh -- a mesh with no solid in it -- and MuJoCo
+    weighs it instead, from the mesh, at the density PartCAD resolved for the
+    part: its own, its material's, or the export's.
+    """
     geom = ElementTree.SubElement(body, "geom")
     geom.set("name", state["geom_names"].take("%s_geom_%d" % (body.get("name"), index), "geom"))
     geom.set("type", "mesh")
@@ -307,12 +327,10 @@ def emit_geom(body, shape_node, placement, asset_name, physics, state, index):
     if rgba is not None:
         geom.set("rgba", rgba)
 
-    if "mass" in physics:
-        # Stated on the body's '<inertial>' rather than here: a body made of
-        # several geoms would otherwise carry its whole mass once per geom.
-        pass
-    else:
-        geom.set("density", mujoco_common.format_numbers([state["options"]["density"]], 6))
+    if not weighed:
+        density = (properties.get("physics") or {}).get("density")
+        if density is not None and float(density) > 0.0:
+            geom.set("density", mujoco_common.format_numbers([float(density)], 6))
 
     for name, (attribute, render) in GEOM_PHYSICS.items():
         if name not in physics:
@@ -332,8 +350,22 @@ def emit_body(parent, node, pose, elements, children_present, state):
         body.set("pos", mujoco_common.format_pos(pose))
         body.set("quat", mujoco_common.format_quat(pose))
 
-    physics = (state["properties"].get(node.get("name")) or {}).get("physics") or {}
-    inertial = carried_inertial(physics)
+    physics = physics_of(node, state)
+    shapes = [
+        (index, shape_node, placement, node_geometry(shape_node))
+        for index, (shape_node, placement) in enumerate(elements)
+    ]
+    shapes = [entry for entry in shapes if entry[3] is not None]
+
+    # One shape is the body, as PartCAD resolved it. Several are added up, each
+    # where the body holds it -- unless the body states its own mass, which
+    # beats the sum of its pieces. See 'mass_properties.of_body()' in PartCAD.
+    own = None if len(elements) == 1 and elements[0][0] is node else physics
+    inertial = carried_inertial(
+        mass_properties.of_body(
+            [(physics_of(shape_node, state), placement) for _, shape_node, placement, _ in shapes], own=own
+        )
+    )
     if inertial is not None:
         write_inertial(body, inertial)
 
@@ -343,12 +375,9 @@ def emit_body(parent, node, pose, elements, children_present, state):
         ElementTree.SubElement(body, "freejoint")
 
     written = 0
-    for index, (shape_node, placement) in enumerate(elements):
-        shape = node_geometry(shape_node)
-        if shape is None:
-            continue
+    for index, shape_node, placement, shape in shapes:
         asset_name = mesh_asset(shape, shape_node, body_name, state)
-        emit_geom(body, shape_node, placement, asset_name, physics, state, index)
+        emit_geom(body, shape_node, placement, asset_name, physics, inertial is not None, state, index)
         written += 1
 
     if not written and not children_present:
@@ -464,7 +493,6 @@ def process(path, request):
             "tolerance": request.get("tolerance", 0.1),
             "angularTolerance": request.get("angularTolerance", 0.1),
             "ascii": request.get("ascii", False),
-            "density": request.get("density") or DEFAULT_DENSITY,
             "static": request.get("static", True),
         },
         "warnings": warnings,
