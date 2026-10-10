@@ -46,8 +46,12 @@ desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 # a model of weightless bodies. It also needs what partcad/partcad#757 adds on
 # top of that: a scene's gravity and fluid in the request, and each shape's
 # measured volume with 'mass_properties.volume_of()', which the buoyancy is
-# worked out from. #757 shipped in 0.8.175.
-partcad: ">=0.8.175"
+# worked out from. #757 shipped in 0.8.175. And it needs where each solid is
+# lifted from - its 'centerOfVolume', with 'mass_properties.displacement_of()' -
+# which the righting moment of a ballasted body is worked out from
+# (partcad/partcad#763).
+# TODO: set to the release partcad/partcad#763 lands in.
+partcad: ">=0.8.178"
 
 docs:
   intro: |
@@ -143,8 +147,11 @@ docs:
     density, linear from the viscosity, about each body's equivalent inertia
     box. The buoyancy is this package's addition, and it is Archimedes with no
     surface -- the fluid fills the whole world, so a body lighter than it rises
-    for as long as the run lasts rather than coming to float, and it is pushed
-    up at its centre of mass. Added mass and lift are not modelled.
+    for as long as the run lasts rather than coming to float. It acts at the
+    body's centre of buoyancy, the centroid of what it displaces, so a body
+    with its weight low down rights itself; the force is MuJoCo's `gravcomp`,
+    and the moment `pc sim` adds each step. Added mass and lift are not
+    modelled.
 
     The gravity a run uses is, in order: `params: {gravity: ...}` on the
     `simulate:`, the scene's, then MuJoCo's `[0, 0, -9.81]`. Neither the export
