@@ -50,6 +50,15 @@ MJCF says "these coordinates are millimetres"; and geometry is written in its
 own frame and placed by the element that holds it, so a shape that appears more
 than once is written once and referenced by every geom that uses it.
 
+What a body weighs is what it is made of. A part that states its ``mass`` gets
+that on the body's ``<inertial>``; every other geom carries a ``density`` and
+MuJoCo integrates the mesh at it, which keeps the mass, the centre of mass and
+the inertia consistent with each other by construction. The density is the
+part's own -- the one its material states, which PartCAD hands over as the
+part's ``density`` property, already in kg/m^3 -- and the export's ``density``
+parameter only for a part that says nothing about what it is made of. See
+'density_of()'.
+
 Note that MuJoCo reads **binary** STL only, which is why ``ascii`` defaults to
 false here and an ``ascii: true`` is reported rather than quietly written.
 """
@@ -78,10 +87,11 @@ import urdf_common  # noqa: E402
 # millimetres and MJCF reads mesh coordinates as metres after scaling.
 MESH_SCALE = 1.0 / urdf_common.MM_PER_M
 
-# Density used when a part does not state a mass, in kg/m^3. Aluminium, the
-# same default the URDF and world exporters use and for the same reason: a
-# middle-of-the-road value for a machined part, whose provenance is obvious in
-# the output rather than looking like a measurement.
+# Density used when a part states neither a mass nor what it is made of, and
+# the export names none either, in kg/m^3. Aluminium, the same default the URDF
+# and world exporters use and for the same reason: a middle-of-the-road value
+# for a machined part, whose provenance is obvious in the output rather than
+# looking like a measurement.
 DEFAULT_DENSITY = 2700.0
 
 # MJCF names end up as XML attributes and are referenced by name from geoms and
@@ -100,8 +110,9 @@ GEOM_PHYSICS = {
 # Every part property this exporter has an MJCF spelling for. A 'physics'
 # property outside this set is one PartCAD supports and MJCF does not: it is
 # reported through the response and logged at info level, which is the mirror
-# image of the reader reporting what it cannot keep.
-MJCF_STATED = frozenset(("mass", "centerOfMass", "inertiaOrientation", "inertia", "friction", "restitution"))
+# image of the reader reporting what it cannot keep. 'density' is the geom's own
+# attribute of that name; see 'density_of()'.
+MJCF_STATED = frozenset(("mass", "centerOfMass", "inertiaOrientation", "inertia", "density", "friction", "restitution"))
 
 
 def _solref_for_restitution(restitution):
@@ -247,7 +258,7 @@ def carried_inertial(physics):
     and their density perfectly well, and an inertia tensor computed here and
     rounded on the way out can fail MuJoCo's positive-definiteness check and
     take the whole model with it. So a part that states its mass gets its mass,
-    and a part that does not gets the density instead (see 'emit_geom').
+    and a part that does not gets a density instead (see 'density_of()').
     """
     if "mass" not in physics:
         return None
@@ -290,6 +301,47 @@ def write_inertial(body, values):
         inertial.set("diaginertia", mujoco_common.format_numbers([1e-6, 1e-6, 1e-6]))
 
 
+def density_of(physics, fallback, warnings, name):
+    """The density, in kg/m^3, one geom is written with.
+
+    'physics' is what to ask, most specific first: the geom's own part, then
+    the body it is a geom of -- the same thing once for an ordinary body, and
+    two different things for a body of several shapes, whose shapes may each be
+    made of something else. The first 'density' any of them states wins, and
+    'fallback' -- the export's 'density' parameter, or DEFAULT_DENSITY -- is
+    what a part that states none of them gets, which is exactly what it got
+    before materials existed.
+
+    A part that names a material has that material's density here: PartCAD
+    resolves the material and merges what it says in underneath what the part
+    states itself, so "the part's density" and "its material's" are one lookup,
+    and a density the part states beats its material's the way a stated
+    friction does. It arrives in kg/m^3 already. The one conversion from the
+    g/mm^3 a material is declared in is PartCAD's ('Material.density_kg_m3'),
+    and there is deliberately no second one here.
+
+    Asked only for a body that states no 'mass': a mass on the bench beats any
+    density, and is written on the body's ``<inertial>`` as it was stated.
+
+    A density that is not a positive number cannot weigh anything, and MuJoCo
+    would refuse the model over it. It is reported and passed over.
+    """
+    for each in physics:
+        value = (each or {}).get("density")
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = math.nan
+        if math.isfinite(value) and value > 0.0:
+            return value
+        warnings.append(
+            "Ignoring the density %r stated for '%s', which is not a positive number" % (each.get("density"), name)
+        )
+    return fallback
+
+
 def emit_geom(body, shape_node, placement, asset_name, physics, state, index):
     """Add one ``<geom>`` to a body, with what its part says about itself."""
     geom = ElementTree.SubElement(body, "geom")
@@ -312,7 +364,14 @@ def emit_geom(body, shape_node, placement, asset_name, physics, state, index):
         # several geoms would otherwise carry its whole mass once per geom.
         pass
     else:
-        geom.set("density", mujoco_common.format_numbers([state["options"]["density"]], 6))
+        # This geom's own part first, then the body's: a body of several
+        # shapes may be made of several things, and MuJoCo weighs each geom at
+        # its own density and sums them, which is what balances it right. For
+        # an ordinary body the two are one part, asked once.
+        own = properties.get("physics") or {}
+        asked = (physics,) if own is physics else (own, physics)
+        density = density_of(asked, state["options"]["density"], state["warnings"], geom.get("name"))
+        geom.set("density", mujoco_common.format_numbers([density], 6))
 
     for name, (attribute, render) in GEOM_PHYSICS.items():
         if name not in physics:
@@ -464,6 +523,9 @@ def process(path, request):
             "tolerance": request.get("tolerance", 0.1),
             "angularTolerance": request.get("angularTolerance", 0.1),
             "ascii": request.get("ascii", False),
+            # What a part is weighed at when neither it nor its material states
+            # a density -- see 'density_of()'. Not an override: a part that says
+            # what it is made of is weighed as that.
             "density": request.get("density") or DEFAULT_DENSITY,
             "static": request.get("static", True),
         },

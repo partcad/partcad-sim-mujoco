@@ -686,6 +686,91 @@ def test_what_a_part_says_about_itself_is_written_rather_than_recomputed(export_
     assert result["unsupported"] == []
 
 
+def _densities(mujoco):
+    """Each geom's ``density``, by the geom's name."""
+    return {geom.get("name"): geom.get("density") for geom in mujoco.iter("geom") if geom.get("type") == "mesh"}
+
+
+def test_a_part_is_weighed_at_what_it_is_made_of(export_mjcf, tmp_path):
+    """The density a part's material states reaches its geom; the export's is for a part that names none.
+
+    What PartCAD hands over for a part made of PTFE is that material's density
+    under the part's own name, already in kg/m^3 -- it resolved the material and
+    converted it -- so this exporter reads a 'density' the way it reads a
+    'friction', and never learns that materials exist.
+    """
+    root = {
+        "name": "//p:bench",
+        "label": "bench",
+        "assembly": [
+            envelope("//p:ptfe", "ptfe", b"PTFE"),
+            envelope("//p:plain", "plain", b"PLAIN", [[50.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
+        ],
+    }
+    properties = {"//p:ptfe": {"material": ":ptfe", "physics": {"density": 2200.0, "friction": 0.04}}}
+
+    result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, properties=properties)
+    assert _densities(mujoco) == {"ptfe_geom_0": "2200", "plain_geom_0": "2700"}
+    # Written, so not reported as lost.
+    assert result["unsupported"] == []
+
+    # The export's own density is a fallback, not an override.
+    _result, mujoco = exported(export_mjcf, tmp_path / "light.xml", root, properties=properties, density=1000.0)
+    assert _densities(mujoco) == {"ptfe_geom_0": "2200", "plain_geom_0": "1000"}
+
+
+def test_a_stated_mass_beats_the_density_of_what_the_part_is_made_of(export_mjcf, tmp_path):
+    """A part weighed on the bench is not weighed again at its material's density."""
+    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    properties = {"//p:cube": {"physics": {"mass": 2.5, "density": 2200.0}}}
+
+    _result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, properties=properties)
+
+    body = mujoco.find("worldbody/body")
+    assert float(body.find("inertial").get("mass")) == pytest.approx(2.5)
+    assert _densities(mujoco) == {"cube_geom_0": None}
+
+
+def test_each_shape_of_a_body_is_weighed_at_its_own_density(export_mjcf, tmp_path):
+    """A body of two shapes in two materials: each geom at its own, the body's for the one that says nothing.
+
+    MuJoCo weighs each geom at its density and sums them, so this is what
+    makes a body of a steel pin and a foam block balance near the pin.
+    """
+    wrist = {
+        "name": "//p:wrist",
+        "label": "wrist",
+        "assembly": [
+            envelope("//p:steel", "wrist/1", b"STEEL"),
+            envelope("//p:foam", "wrist/2", b"FOAM", [[100.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
+            envelope("//p:bare", "wrist/3", b"BARE", [[200.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
+        ],
+    }
+    root = {"name": "//p:arm", "label": "arm", "assembly": [wrist]}
+    properties = {
+        # The body says what it is made of; two of its shapes say otherwise.
+        "//p:wrist": {"physics": {"density": 2700.0}},
+        "//p:steel": {"physics": {"density": 8000.0}},
+        "//p:foam": {"physics": {"density": 100.0}},
+    }
+
+    _result, mujoco = exported(export_mjcf, tmp_path / "arm.xml", root, properties=properties)
+
+    body = mujoco.find("worldbody/body[@name='wrist']")
+    assert [geom.get("density") for geom in body.findall("geom")] == ["8000", "100", "2700"]
+
+
+def test_a_density_that_weighs_nothing_is_reported_and_passed_over(export_mjcf, tmp_path):
+    """MuJoCo would refuse the model over it, so it is not written."""
+    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    properties = {"//p:cube": {"physics": {"density": 0.0}}}
+
+    result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, properties=properties)
+
+    assert _densities(mujoco) == {"cube_geom_0": "2700"}
+    assert any("density" in warning and "cube_geom_0" in warning for warning in result["warnings"])
+
+
 def test_a_property_mjcf_cannot_state_is_reported_rather_than_lost(export_mjcf, tmp_path):
     root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
     properties = {"//p:cube": {"physics": {"selfCollide": True}}}
