@@ -691,84 +691,113 @@ def _densities(mujoco):
     return {geom.get("name"): geom.get("density") for geom in mujoco.iter("geom") if geom.get("type") == "mesh"}
 
 
-def test_a_part_is_weighed_at_what_it_is_made_of(export_mjcf, tmp_path):
-    """The density a part's material states reaches its geom; the export's is for a part that names none.
+def _numbers(element, attribute):
+    return [float(v) for v in element.get(attribute).split()]
 
-    What PartCAD hands over for a part made of PTFE is that material's density
-    under the part's own name, already in kg/m^3 -- it resolved the material and
-    converted it -- so this exporter reads a 'density' the way it reads a
-    'friction', and never learns that materials exist.
+
+# What PartCAD hands over for a 20 mm PTFE cube centred on its origin: its mass,
+# centre and inertia already worked out from its solid at the material's
+# 2200 kg/m^3 (see 'partcad.physics'), beside the density and the friction the
+# material lent.
+PTFE_CUBE = {
+    "density": 2200.0,
+    "friction": 0.04,
+    "mass": 0.0176,
+    "centerOfMass": [0.0, 0.0, 0.0],
+    "inertia": {"ixx": 1.17333e-06, "ixy": 0.0, "ixz": 0.0, "iyy": 1.17333e-06, "iyz": 0.0, "izz": 1.17333e-06},
+}
+
+
+def test_a_body_weighs_what_partcad_says_its_part_weighs(export_mjcf, tmp_path):
+    """The resolved mass, centre and inertia go on the body, and nothing is worked out here.
+
+    So a model MuJoCo runs weighs what 'pc info' says, and what the URDF and
+    SDFormat exports of the same object weigh.
     """
-    root = {
-        "name": "//p:bench",
-        "label": "bench",
-        "assembly": [
-            envelope("//p:ptfe", "ptfe", b"PTFE"),
-            envelope("//p:plain", "plain", b"PLAIN", [[50.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
-        ],
-    }
-    properties = {"//p:ptfe": {"material": ":ptfe", "physics": {"density": 2200.0, "friction": 0.04}}}
+    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:ptfe", "ptfe", b"PTFE")]}
+    properties = {"//p:ptfe": {"material": ":ptfe", "physics": dict(PTFE_CUBE)}}
 
     result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, properties=properties)
-    assert _densities(mujoco) == {"ptfe_geom_0": "2200", "plain_geom_0": "2700"}
-    # Written, so not reported as lost.
+
+    inertial = mujoco.find("worldbody/body/inertial")
+    assert float(inertial.get("mass")) == pytest.approx(0.0176)
+    assert _numbers(inertial, "pos") == pytest.approx([0.0, 0.0, 0.0])
+    assert _numbers(inertial, "fullinertia") == pytest.approx([1.17333e-06] * 3 + [0.0] * 3)
+    # Weighed, so MuJoCo is not asked to weigh it again from the mesh.
+    assert _densities(mujoco) == {"ptfe_geom_0": None}
+    assert mujoco.find("worldbody/body/geom").get("friction").split()[0] == "0.04"
+    # 'density' is not lost: it is what the inertial was worked out from.
     assert result["unsupported"] == []
 
-    # The export's own density is a fallback, not an override.
-    _result, mujoco = exported(export_mjcf, tmp_path / "light.xml", root, properties=properties, density=1000.0)
-    assert _densities(mujoco) == {"ptfe_geom_0": "2200", "plain_geom_0": "1000"}
 
+def test_a_body_of_several_shapes_is_added_up_by_partcad_s_helper(export_mjcf, tmp_path):
+    """Two materials in one body, each where the body holds it: 'mass_properties.of_body()'.
 
-def test_a_stated_mass_beats_the_density_of_what_the_part_is_made_of(export_mjcf, tmp_path):
-    """A part weighed on the bench is not weighed again at its material's density."""
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
-    properties = {"//p:cube": {"physics": {"mass": 2.5, "density": 2200.0}}}
-
-    _result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, properties=properties)
-
-    body = mujoco.find("worldbody/body")
-    assert float(body.find("inertial").get("mass")) == pytest.approx(2.5)
-    assert _densities(mujoco) == {"cube_geom_0": None}
-
-
-def test_each_shape_of_a_body_is_weighed_at_its_own_density(export_mjcf, tmp_path):
-    """A body of two shapes in two materials: each geom at its own, the body's for the one that says nothing.
-
-    MuJoCo weighs each geom at its density and sums them, so this is what
-    makes a body of a steel pin and a foam block balance near the pin.
+    The same function the URDF and SDFormat exporters add a link up with, so
+    the three formats agree on where it balances.
     """
+    import mass_properties
+
+    steel = {
+        "mass": 0.064,
+        "centerOfMass": [0.0, 0.0, 0.0],
+        "inertia": {"ixx": 4.27e-06, "iyy": 4.27e-06, "izz": 4.27e-06},
+    }
+    foam = {
+        "mass": 0.0008,
+        "centerOfMass": [0.0, 0.0, 0.0],
+        "inertia": {"ixx": 5.3e-08, "iyy": 5.3e-08, "izz": 5.3e-08},
+    }
+    apart = [[100.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]
+    wrist = {
+        "name": "//p:wrist",
+        "label": "wrist",
+        "assembly": [envelope("//p:steel", "wrist/1", b"STEEL"), envelope("//p:foam", "wrist/2", b"FOAM", apart)],
+    }
+    root = {"name": "//p:arm", "label": "arm", "assembly": [wrist]}
+    properties = {"//p:steel": {"physics": steel}, "//p:foam": {"physics": foam}}
+
+    _result, mujoco = exported(export_mjcf, tmp_path / "arm.xml", root, properties=properties)
+
+    expected = mass_properties.of_body([(steel, None), (foam, apart)])
+    inertial = mujoco.find("worldbody/body[@name='wrist']/inertial")
+    assert float(inertial.get("mass")) == pytest.approx(0.0648)
+    assert _numbers(inertial, "pos")[0] == pytest.approx(expected["centerOfMass"][0] / 1000.0)
+    # Near the steel: a hundredth of a metre's worth of foam, 100 mm away.
+    assert _numbers(inertial, "pos")[0] < 0.002
+    assert _numbers(inertial, "fullinertia")[1] == pytest.approx(expected["inertia"]["iyy"])
+
+
+def test_a_body_that_states_its_own_mass_beats_the_sum_of_its_shapes(export_mjcf, tmp_path):
     wrist = {
         "name": "//p:wrist",
         "label": "wrist",
         "assembly": [
-            envelope("//p:steel", "wrist/1", b"STEEL"),
-            envelope("//p:foam", "wrist/2", b"FOAM", [[100.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
-            envelope("//p:bare", "wrist/3", b"BARE", [[200.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
+            envelope("//p:a", "wrist/1", b"A"),
+            envelope("//p:b", "wrist/2", b"B", [[50.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
         ],
     }
     root = {"name": "//p:arm", "label": "arm", "assembly": [wrist]}
     properties = {
-        # The body says what it is made of; two of its shapes say otherwise.
-        "//p:wrist": {"physics": {"density": 2700.0}},
-        "//p:steel": {"physics": {"density": 8000.0}},
-        "//p:foam": {"physics": {"density": 100.0}},
+        "//p:wrist": {"physics": {"mass": 3.0}},
+        "//p:a": {"physics": dict(PTFE_CUBE)},
+        "//p:b": {"physics": dict(PTFE_CUBE)},
     }
 
     _result, mujoco = exported(export_mjcf, tmp_path / "arm.xml", root, properties=properties)
 
-    body = mujoco.find("worldbody/body[@name='wrist']")
-    assert [geom.get("density") for geom in body.findall("geom")] == ["8000", "100", "2700"]
+    assert float(mujoco.find("worldbody/body[@name='wrist']/inertial").get("mass")) == pytest.approx(3.0)
 
 
-def test_a_density_that_weighs_nothing_is_reported_and_passed_over(export_mjcf, tmp_path):
-    """MuJoCo would refuse the model over it, so it is not written."""
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
-    properties = {"//p:cube": {"physics": {"density": 0.0}}}
+def test_a_mesh_partcad_could_not_weigh_is_weighed_by_mujoco_at_its_density(export_mjcf, tmp_path):
+    """A mesh with no solid in it has no mass PartCAD could work out, and still has a density."""
+    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:scan", "scan", b"SCAN")]}
+    properties = {"//p:scan": {"physics": {"density": 2200.0, "friction": 0.04}}}
 
-    result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, properties=properties)
+    _result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, properties=properties)
 
-    assert _densities(mujoco) == {"cube_geom_0": "2700"}
-    assert any("density" in warning and "cube_geom_0" in warning for warning in result["warnings"])
+    assert mujoco.find("worldbody/body/inertial") is None
+    assert _densities(mujoco) == {"scan_geom_0": "2200"}
 
 
 def test_a_property_mjcf_cannot_state_is_reported_rather_than_lost(export_mjcf, tmp_path):

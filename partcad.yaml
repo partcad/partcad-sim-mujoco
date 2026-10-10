@@ -39,6 +39,14 @@
 name: //pub/feature/simulate/mujoco
 desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 
+# The PartCAD that resolves every part's mass, centre of mass and inertia and
+# ships 'mass_properties' in its sandbox contract, which the MJCF writer adds a
+# body's shapes up with. An older PartCAD hands it parts with no mass worked out
+# and no helper to add them up with, and refuses this package rather than write
+# a model of weightless bodies.
+# TODO: set to the release partcad/partcad#755 lands in, if that is not this one.
+partcad: ">=0.8.169"
+
 docs:
   intro: |
     [MuJoCo](https://mujoco.org/) describes a model in **MJCF**, an XML dialect
@@ -81,12 +89,13 @@ docs:
     MuJoCo's own default of 1.0 -- which is a plausible number for metal on
     metal and a badly wrong one for PTFE, and, worse, is a number nobody chose.
 
-    The same material says what the part weighs. Its `density` is written on
-    the part's geom, and MuJoCo works out the mass, the centre of mass and the
-    inertia from the mesh at that density -- so a PTFE block weighs what PTFE
-    weighs, not what aluminium does. A part that states its own `mass` keeps
-    it; one that names no material is weighed at the export's `density`, which
-    is aluminium's unless it says otherwise.
+    The same material says what the part weighs. PartCAD works out every
+    part's mass, centre of mass and inertia from its solid and the density of
+    what it is made of -- the same numbers `pc info` shows -- and they are what
+    the model's bodies weigh, so a PTFE block weighs what PTFE weighs, not
+    what aluminium does. A part that states its own `mass` keeps it; one that
+    names no material is weighed at the export's `density`, which is
+    aluminium's unless it says otherwise.
   usage: |
     Import this package and name it from the sections that use it:
 
@@ -180,17 +189,18 @@ export:
     ground_plane: true
     # 'model_name' defaults to the object's label, 'mesh_dir' to
     # '<file stem>_meshes' next to the model file, and 'timestep' to MuJoCo's.
-    # 'density' (kg/m^3) is what a geom is weighed at when its part states no
-    # mass and names no material with a density of its own -- a part made of
-    # something is weighed as that -- and defaults to aluminium's.
+    # 'density' (kg/m^3) is what PartCAD weighs a part at that states no
+    # density and is made of nothing that does -- a part made of something is
+    # weighed as that -- and defaults to aluminium's. PartCAD reads it, not
+    # this exporter, which is handed the masses already worked out.
     # model_name: <name>
     # mesh_dir: <directory>
     # density: 2700.0
     # timestep: 0.002
     gravity: [0.0, 0.0, -9.81]
     # Hand the exporter what the parts report about themselves -- mass,
-    # density, friction, colour, and what their materials say of the two in
-    # the middle -- so that it writes those rather than losing them.
+    # inertia, density, friction, colour, and what PartCAD worked out of what
+    # they are made of -- so that it writes those rather than losing them.
     properties: true
 
 import:
