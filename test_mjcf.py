@@ -857,6 +857,7 @@ WATER = {"material": "//pub/std/manufacturing/material/fluid:water", "density": 
 ALUMINIUM_CUBE = {
     "density": 2700.0,
     "volume": 8000.0,
+    "centerOfVolume": [0.0, 0.0, 0.0],
     "mass": 0.0216,
     "centerOfMass": [0.0, 0.0, 0.0],
     "inertia": {"ixx": 1.44e-06, "ixy": 0.0, "ixz": 0.0, "iyy": 1.44e-06, "iyz": 0.0, "izz": 1.44e-06},
@@ -981,6 +982,137 @@ def test_a_fluid_with_no_density_drags_but_does_not_buoy(export_mjcf, tmp_path):
     assert option.get("density") is None
     assert option.get("viscosity") == "10"
     assert mujoco.find("worldbody/body").get("gravcomp") is None
+
+
+#
+# Where the lift acts: the centre of buoyancy
+#
+
+
+def test_the_exporter_and_the_simulation_agree_on_where_the_centre_of_buoyancy_is_written():
+    import export_mjcf as module
+    import simulate_mujoco
+
+    assert module.CENTRE_OF_BUOYANCY_PREFIX == simulate_mujoco.CENTRE_OF_BUOYANCY_PREFIX
+
+
+def test_each_buoyed_body_carries_its_centre_of_buoyancy(export_mjcf, tmp_path):
+    """In metres, in the body's frame: what PartCAD measured, moved to where the body holds it."""
+    ballasted = dict(FLOAT_CUBE, centerOfMass=[0.0, 0.0, -6.0], centerOfVolume=[0.0, 0.0, 2.0])
+    _result, mujoco = exported(
+        export_mjcf, tmp_path / "a.xml", one_cube(), world={"medium": WATER}, properties=resolved(ballasted)
+    )
+
+    (numeric,) = mujoco.findall("custom/numeric")
+    assert numeric.get("name") == "partcad:centre_of_buoyancy:cube"
+    assert [float(v) for v in numeric.get("data").split()] == pytest.approx([0.0, 0.0, 0.002])
+
+
+def test_a_model_with_nothing_buoyed_carries_no_custom_data(export_mjcf, tmp_path):
+    _result, mujoco = exported(export_mjcf, tmp_path / "a.xml", one_cube(), properties=resolved(ALUMINIUM_CUBE))
+    assert mujoco.find("custom") is None
+
+
+def test_a_body_with_no_centre_of_volume_is_buoyed_at_its_centre_of_mass_and_says_so(export_mjcf, tmp_path):
+    unplaced = {key: value for key, value in ALUMINIUM_CUBE.items() if key != "centerOfVolume"}
+    result, mujoco = exported(
+        export_mjcf, tmp_path / "a.xml", one_cube(), world={"medium": WATER}, properties=resolved(unplaced)
+    )
+
+    assert mujoco.find("worldbody/body").get("gravcomp") is not None
+    assert mujoco.find("custom") is None
+    assert any("not righted" in warning for warning in result["warnings"])
+
+
+def keeled(export_mjcf, monkeypatch, tmp_path, name, keel_offset, centres=True):
+    """A light hull with a heavy keel bolted under it, released turned 60 degrees about X.
+
+    One body of two shapes - "boat/hull" and "boat/keel" - so it is the body's
+    centre of buoyancy, combined from both, that does the righting, and the
+    keel's weight that is low.
+    """
+    import shutil
+
+    import simulate_mujoco
+
+    monkeypatch.setattr(export_mjcf, "write_mesh", lambda shape, path, options: shutil.copyfile(STL_EXAMPLE, path))
+
+    def cube(mass):
+        # 'cube.stl' is a 10 mm cube with a corner at the origin, so its centre
+        # is (5, 5, 5): its mass and its volume are both centred there.
+        moment = mass * 0.01**2 / 6.0
+        return {
+            "volume": 1000.0,
+            "centerOfVolume": [5.0, 5.0, 5.0],
+            "mass": mass,
+            "centerOfMass": [5.0, 5.0, 5.0],
+            "inertia": {"ixx": moment, "iyy": moment, "izz": moment, "ixy": 0.0, "ixz": 0.0, "iyz": 0.0},
+        }
+
+    boat = {
+        "name": "//p:boat",
+        "label": "boat",
+        "location": [[0.0, 0.0, 100.0], [1.0, 0.0, 0.0], 60.0],
+        "assembly": [
+            envelope("//p:hull", "boat/hull", b"HULL", [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
+            envelope("//p:keel", "boat/keel", b"KEEL", [[0.0, 0.0, keel_offset], [0.0, 0.0, 1.0], 0.0]),
+        ],
+    }
+    root = {"name": "//p:tank", "label": "tank", "assembly": [boat]}
+    # Together they weigh 1.4 g against 2 g of water displaced, so the boat
+    # rises; the keel is six times as heavy as the hull, so it balances near it.
+    properties = {"//p:hull": {"physics": cube(0.0002)}, "//p:keel": {"physics": cube(0.0012)}}
+    path = tmp_path / name
+    exported(
+        export_mjcf,
+        path,
+        root,
+        flatten=False,
+        static=False,
+        properties=properties,
+        world={"medium": WATER},
+    )
+    if not centres:
+        # What MuJoCo's own viewer makes of the file: the lift, at the centre of
+        # mass, and no moment.
+        text = path.read_text(encoding="utf-8")
+        start, end = text.index("<custom>"), text.index("</custom>") + len("</custom>")
+        path.write_text(text[:start] + text[end:], encoding="utf-8")
+    result = simulate_mujoco.process(str(tmp_path), {"scene_file": str(path), "duration": 3.0})
+
+    def upright(reading):
+        w, x, y, z = reading["bodies"]["boat"]["quat"]
+        return 1 - 2 * (x * x + y * y)
+
+    return upright(result["before"]), upright(result["after"])
+
+
+def test_a_hull_with_a_heavy_keel_below_it_rights_itself(export_mjcf, monkeypatch, tmp_path):
+    """The obvious answer: released at 60 degrees, its heavy side ends down."""
+    pytest.importorskip("mujoco")
+
+    before, after = keeled(export_mjcf, monkeypatch, tmp_path, "below.xml", -10.0)
+
+    assert before == pytest.approx(0.5, abs=1e-6)
+    assert after > 0.9
+
+
+def test_a_hull_with_its_keel_on_top_capsizes(export_mjcf, monkeypatch, tmp_path):
+    """And the same body the other way up turns over, which is the same moment with the other sign."""
+    pytest.importorskip("mujoco")
+
+    _before, after = keeled(export_mjcf, monkeypatch, tmp_path, "above.xml", 10.0)
+
+    assert after < -0.9
+
+
+def test_what_rights_it_is_the_lift_at_the_centre_of_buoyancy(export_mjcf, monkeypatch, tmp_path):
+    """Without the centre of buoyancy - the model as MuJoCo's viewer reads it - it rises as it was released."""
+    pytest.importorskip("mujoco")
+
+    before, after = keeled(export_mjcf, monkeypatch, tmp_path, "at-mass.xml", -10.0, centres=False)
+
+    assert after == pytest.approx(before, abs=0.05)
 
 
 def test_a_body_partcad_could_not_measure_is_given_no_buoyancy_and_says_so(export_mjcf, tmp_path):
