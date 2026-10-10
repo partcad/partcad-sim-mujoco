@@ -47,10 +47,61 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # reach into it.
 MM_PER_M = 1000.0
 
+# The '<custom><numeric>' a buoyed body's centre of buoyancy is written under
+# by this package's exporter, followed by the body's name: three numbers, in
+# metres, in the body's own frame. 'export_mjcf.CENTRE_OF_BUOYANCY_PREFIX' is
+# its twin; a test keeps the two the same.
+CENTRE_OF_BUOYANCY_PREFIX = "partcad:centre_of_buoyancy:"
+
 # MuJoCo's own viewer shows geom groups 0 to 2 and hides the rest, and models
 # put what is only there to collide - a convex hull, a simplified proxy - in a
 # group above those. The snapshots show what MuJoCo's viewer would.
 VISIBLE_GROUPS = 3
+
+
+def centres_of_buoyancy(mujoco, model):
+    """(body id, centre of buoyancy in the body's frame) for every body the exporter buoyed.
+
+    The lift itself is the body's ``gravcomp`` -- MuJoCo applies it at the
+    centre of mass, which is where it belongs for a body of one material. A
+    body whose centre of mass is not its centre of volume (a keel, a ballast)
+    also needs the moment that lift has about its centre of mass, and MuJoCo has
+    no way to apply a force anywhere else; 'apply_buoyancy_moments' does it from
+    what this returns. Empty for a model with no fluid, or one PartCAD did not
+    write.
+    """
+    import numpy
+
+    found = []
+    for index in range(model.nnumeric):
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_NUMERIC, index) or ""
+        if not name.startswith(CENTRE_OF_BUOYANCY_PREFIX):
+            continue
+        body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name[len(CENTRE_OF_BUOYANCY_PREFIX) :])
+        start, size = model.numeric_adr[index], model.numeric_size[index]
+        if body < 0 or size != 3:
+            continue
+        found.append((body, numpy.array(model.numeric_data[start : start + size], dtype=float)))
+    return found
+
+
+def apply_buoyancy_moments(model, data, centres):
+    """Turn each buoyed body by the moment its lift has about its centre of mass.
+
+    The lift is what ``gravcomp`` applies at the centre of mass:
+    -gravcomp * mass * gravity. Acting at the centre of buoyancy instead, it
+    adds the moment (r_buoyancy - r_mass) x lift, which is what rights a body
+    whose ballast is below its middle and capsizes one whose ballast is above.
+    Set every step, before MuJoCo steps, from where the body is now; it is a
+    torque alone, so the lift is not applied twice.
+    """
+    import numpy
+
+    gravity = numpy.array(model.opt.gravity, dtype=float)
+    for body, local in centres:
+        lift = -model.body_gravcomp[body] * model.body_mass[body] * gravity
+        point = data.xpos[body] + data.xmat[body].reshape(3, 3) @ local
+        data.xfrc_applied[body, 3:6] = numpy.cross(point - data.xipos[body], lift)
 
 
 def snapshot(mujoco, model, data):
@@ -196,7 +247,10 @@ def process(path, request):
     trace = []
     next_sample = duration / (samples + 1) if samples > 0 else None
     steps = 0
+    centres = centres_of_buoyancy(mujoco, model)
     while data.time < duration:
+        if centres:
+            apply_buoyancy_moments(model, data, centres)
         mujoco.mj_step(model, data)
         steps += 1
         if next_sample is not None and data.time >= next_sample:

@@ -247,6 +247,7 @@ converted on the way:
 | the medium's `density` (kg/m³) | `<option density>` (kg/m³) |
 | the medium's `viscosity` (Pa·s) | `<option viscosity>` (Pa·s) |
 | the medium's `density` again | each body's `gravcomp`: ρ_fluid · V / m |
+| where the body displaces it | `<custom><numeric name="partcad:centre_of_buoyancy:<body>">`: the centre of buoyancy, m, in the body's frame |
 
 `m` is the mass on the body's `<inertial>`, which PartCAD resolved, and `V` the
 volume PartCAD measured the body's solids to enclose, handed over beside it and
@@ -275,9 +276,20 @@ mass, so it follows any `gravity` a run is given. What that leaves out:
 * **A surface.** The fluid fills the whole world. A body lighter than it rises
   for as long as the run lasts, at the speed its drag allows, rather than coming
   to float at a waterline.
-* **The centre of buoyancy.** The force acts at the centre of mass. For a body
-  of one material the two coincide; for one of several, the righting moment a
-  real body would feel is missing.
+* **The centre of buoyancy, outside `pc sim`.** The lift acts at the centre of
+  buoyancy -- the centroid of what the body displaces, PartCAD's
+  `centerOfVolume` combined per body by `mass_properties.displacement_of()` --
+  which is what rights a body whose weight is not centred where its volume is:
+  a hull with a heavy keel, a float that states a low `centerOfMass`. MJCF has
+  no way to say where a force acts, so `gravcomp` applies it at the centre of
+  mass and the simulation adds the moment `(r_buoyancy − r_mass) × lift` to the
+  body every step, through `xfrc_applied`, from the centre of buoyancy the
+  exporter writes as a custom numeric. The same model opened in MuJoCo's viewer
+  floats but does not right itself.
+* **Partial submersion.** There is no surface, so nothing is ever half in the
+  water. A waterline would need the volume below it and that volume's centroid
+  every step, out of the mesh -- geometry the simulation would have to do
+  itself, which nothing PartCAD hands over could answer in advance.
 * **Sealed cavities.** The volume displaced is the solid's, so a hollow part is
   buoyed as if flooded. A float is drawn as the solid it displaces, and states
   its own `mass`; PartCAD scales the solid's inertia to it.

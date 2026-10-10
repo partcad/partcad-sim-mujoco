@@ -133,10 +133,17 @@ DEFAULT_GRAVITY = (0.0, 0.0, -9.81)
 #     rises for ever, at the speed its drag allows, rather than coming to float
 #     at a waterline: there is no waterline. A scene with a surface is a
 #     different model, and Gazebo's graded buoyancy is the nearest thing to one.
-#   * **The centre of mass, not the centre of buoyancy.** ``gravcomp`` pushes
-#     where gravity pulls, so a body of one material -- whose two centres
-#     coincide -- is right, and one of several, whose buoyancy would right it, is
-#     not given that moment.
+#   * **The centre of buoyancy, but only in a run.** ``gravcomp`` pushes where
+#     gravity pulls, at the centre of mass, which for a body of one material is
+#     also its centre of volume and so is right. A body whose mass is not
+#     centred where its volume is -- a hull with a lead keel, a float that
+#     states a low 'centerOfMass' -- would get no righting moment from that,
+#     and MJCF has no way to say where else a force acts. So the centre of
+#     buoyancy of every buoyed body is written into the model as a
+#     ``<custom><numeric>`` (see CENTRE_OF_BUOYANCY_PREFIX), and the simulation
+#     beside this applies the moment the lift has about the centre of mass,
+#     every step, through ``xfrc_applied``. Opened anywhere else, the model
+#     floats but does not right itself.
 #   * **Displaced volume is the solid's.** A sealed hollow part is buoyed by the
 #     material it is made of, as if flooded. A float is drawn as the solid it
 #     displaces and states its own mass.
@@ -150,6 +157,13 @@ DEFAULT_GRAVITY = (0.0, 0.0, -9.81)
 # ``integrator="implicitfast"``. One with none keeps MuJoCo's default, and every
 # existing model the bytes it had.
 FLUID_INTEGRATOR = "implicitfast"
+
+# The name of the '<custom><numeric>' each buoyed body's centre of buoyancy is
+# written under, followed by the body's name: three numbers, metres, in the
+# body's own frame. 'simulate_mujoco.CENTRE_OF_BUOYANCY_PREFIX' is its twin and
+# reads it back; the two scripts run in different sandboxes and cannot import
+# each other, and a test keeps them the same.
+CENTRE_OF_BUOYANCY_PREFIX = "partcad:centre_of_buoyancy:"
 
 # How MuJoCo resolves friction, written into every model unless an export
 # says otherwise ('cone', 'impratio', 'noslip_iterations'; null leaves
@@ -189,11 +203,22 @@ GEOM_PHYSICS = {
 # attribute of that name, written where MuJoCo has to weigh a mesh itself, and
 # otherwise what the '<inertial>' PartCAD worked out was worked out from.
 #
-# 'volume' is not a property MJCF states either, and is not one a part states:
-# it is what PartCAD measured the solid to enclose, and it goes into the model
-# as what the body displaces of the scene's fluid (see 'write_buoyancy').
+# 'volume' and 'centerOfVolume' are not properties MJCF states either, and are
+# not ones a part states: they are what PartCAD measured the solid to enclose
+# and where, and they go into the model as what the body displaces of the
+# scene's fluid and where it is lifted from (see 'write_buoyancy').
 MJCF_STATED = frozenset(
-    ("mass", "centerOfMass", "inertiaOrientation", "inertia", "density", "volume", "friction", "restitution")
+    (
+        "mass",
+        "centerOfMass",
+        "inertiaOrientation",
+        "inertia",
+        "density",
+        "volume",
+        "centerOfVolume",
+        "friction",
+        "restitution",
+    )
 )
 
 
@@ -289,11 +314,13 @@ def write_buoyancy(body, inertial, parts, state):
     'inertial' is the mass properties the body was just written with -- what
     'mass_properties.of_body()' made of what PartCAD resolved -- and 'parts' the
     same (physics, placement) pairs it was made from, which carry the volume
-    PartCAD measured each solid to enclose. The fraction is the mass of the
-    fluid displaced over the body's own: 'mass_properties.mass_of()' of the
-    body's volume at the fluid's density, over the body's mass. Nothing is
-    measured or weighed here, so the buoyancy and the '<inertial>' are of one
-    body and cannot disagree about it.
+    PartCAD measured each solid to enclose and its centroid. The fraction is
+    the mass of the fluid displaced over the body's own:
+    'mass_properties.mass_of()' of the body's volume at the fluid's density,
+    over the body's mass. Where that lift acts is the body's centre of volume,
+    'mass_properties.displacement_of()', which is recorded for
+    'write_centres_of_buoyancy()'. Nothing is measured or weighed here, so the
+    buoyancy and the '<inertial>' are of one body and cannot disagree about it.
 
     Nothing is written for a scene with no fluid. A body PartCAD could not weigh
     (no '<inertial>', so MuJoCo weighs the mesh itself) or whose volume is not
@@ -303,7 +330,8 @@ def write_buoyancy(body, inertial, parts, state):
     fluid = state["fluid_density"]
     if not fluid:
         return
-    volume = mass_properties.volume_of(parts)
+    displacement = mass_properties.displacement_of(parts)
+    volume = displacement["volume"] if displacement else mass_properties.volume_of(parts)
     mass = inertial.get("mass") if inertial else None
     if volume is None or not mass:
         state["warnings"].append(
@@ -313,6 +341,34 @@ def write_buoyancy(body, inertial, parts, state):
         return
     displaced = mass_properties.mass_of(volume, fluid)
     body.set("gravcomp", mujoco_common.format_numbers([displaced / float(mass)], 6))
+    if displacement is None:
+        state["warnings"].append(
+            "%s has no centre of volume PartCAD could resolve, so it is buoyed at its centre of mass and is not "
+            "righted" % body.get("name")
+        )
+        return
+    # Where the lift acts, in the body's frame and in metres, for the
+    # simulation to apply the moment about the centre of mass from.
+    centre = [value / urdf_common.MM_PER_M for value in displacement[mass_properties.CENTER_OF_VOLUME_KEY]]
+    state["centres_of_buoyancy"].append((body.get("name"), centre))
+
+
+def write_centres_of_buoyancy(mujoco, state):
+    """Write each buoyed body's centre of buoyancy as a ``<custom><numeric>``.
+
+    MJCF has a place for arbitrary numbers a program reads back -- custom
+    numerics, which MuJoCo loads and ignores -- and none for "apply this force
+    here", so this is where the simulation finds the point. Nothing is written
+    for a model with nothing buoyed in it, so every other model is the file it
+    always was.
+    """
+    if not state["centres_of_buoyancy"]:
+        return
+    custom = ElementTree.SubElement(mujoco, "custom")
+    for name, centre in state["centres_of_buoyancy"]:
+        numeric = ElementTree.SubElement(custom, "numeric")
+        numeric.set("name", CENTRE_OF_BUOYANCY_PREFIX + name)
+        numeric.set("data", mujoco_common.format_numbers(centre))
 
 
 def mesh_asset(shape, node, body_name, state):
@@ -657,9 +713,11 @@ def process(path, request):
         # rather than being recomputed.
         "properties": request.get("properties") or {},
         "unsupported": set(),
-        # The scene's fluid's density, in kg/m^3, or None in a vacuum. See
+        # The scene's fluid's density, in kg/m^3, or None in a vacuum, and the
+        # (body, centre of buoyancy) of each body buoyed in it. See
         # 'write_buoyancy'.
         "fluid_density": fluid_density,
+        "centres_of_buoyancy": [],
         "options": {
             "tolerance": request.get("tolerance", 0.1),
             "angularTolerance": request.get("angularTolerance", 0.1),
@@ -685,6 +743,8 @@ def process(path, request):
         for child in root.get(ocp_serialize.KEY_ASSEMBLY) or []:
             child_pose = urdf_common.compose(root_pose, urdf_common.from_packed(child.get(ocp_serialize.KEY_LOCATION)))
             emit(child, worldbody, child_pose, state)
+
+    write_centres_of_buoyancy(mujoco, state)
 
     if not state["meshes"]:
         warnings.append("Nothing was exported: the object holds no geometry MJCF can reference")

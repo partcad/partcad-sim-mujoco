@@ -46,10 +46,16 @@ desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 # a model of weightless bodies. It also needs what partcad/partcad#757 adds on
 # top of that: a scene's gravity and fluid in the request, and each shape's
 # measured volume with 'mass_properties.volume_of()', which the buoyancy is
-# worked out from. PartCAD releases on every merge to 'devel', so #755 is
-# expected to ship as 0.8.169 and #757 as 0.8.170.
-# TODO: this must be the release #757 actually lands in; correct it if it is not.
-partcad: ">=0.8.170"
+# worked out from. And it needs where each solid is lifted from - its
+# 'centerOfVolume', with 'mass_properties.displacement_of()' - which the
+# righting moment of a ballasted body is worked out from (the PartCAD pull
+# request "Hand every exporter where each solid is lifted from"). PartCAD
+# releases on every merge to 'devel': #755 is expected to ship as 0.8.169, #757
+# as 0.8.170, and the two stacked on it - the tilted examples and the friction
+# table - as 0.8.171 and 0.8.172, so this as 0.8.173.
+# TODO: this must be the release the centre-of-volume change actually lands in;
+# correct it if it is not.
+partcad: ">=0.8.173"
 
 docs:
   intro: |
@@ -124,8 +130,11 @@ docs:
     density, linear from the viscosity, about each body's equivalent inertia
     box. The buoyancy is this package's addition, and it is Archimedes with no
     surface -- the fluid fills the whole world, so a body lighter than it rises
-    for as long as the run lasts rather than coming to float, and it is pushed
-    up at its centre of mass. Added mass and lift are not modelled.
+    for as long as the run lasts rather than coming to float. It acts at the
+    body's centre of buoyancy, the centroid of what it displaces, so a body
+    with its weight low down rights itself; the force is MuJoCo's `gravcomp`,
+    and the moment `pc sim` adds each step. Added mass and lift are not
+    modelled.
 
     The gravity a run uses is, in order: `params: {gravity: ...}` on the
     `simulate:`, the scene's, then MuJoCo's `[0, 0, -9.81]`. Neither the export
