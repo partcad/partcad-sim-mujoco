@@ -43,11 +43,13 @@ desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 # ships 'mass_properties' in its sandbox contract, which the MJCF writer adds a
 # body's shapes up with. An older PartCAD hands it parts with no mass worked out
 # and no helper to add them up with, and refuses this package rather than write
-# a model of weightless bodies. The same release hands it a scene's gravity
-# and fluid, and each shape's measured volume, which the buoyancy is worked out
-# from (partcad/partcad#757).
-# TODO: set to the release partcad/partcad#755 and #757 land in, if that is not this one.
-partcad: ">=0.8.169"
+# a model of weightless bodies. It also needs what partcad/partcad#757 adds on
+# top of that: a scene's gravity and fluid in the request, and each shape's
+# measured volume with 'mass_properties.volume_of()', which the buoyancy is
+# worked out from. PartCAD releases on every merge to 'devel', so #755 is
+# expected to ship as 0.8.169 and #757 as 0.8.170.
+# TODO: this must be the release #757 actually lands in; correct it if it is not.
+partcad: ">=0.8.170"
 
 docs:
   intro: |
