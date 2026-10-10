@@ -54,7 +54,7 @@ four are about that one format:
 | `import:` | read an `.xml` MJCF model as a PartCAD object | `type: sim-mujoco:mjcf` |
 | `export:` | write a PartCAD scene or assembly out as one | `pc export -t sim-mujoco:mjcf` |
 | `simulation:` | run one and say where everything ended up | `simulation: sim-mujoco:mujoco` |
-| `open:` | open one in the MuJoCo viewer | `pc open --with mujoco` |
+| `open:` | open one in the MuJoCo viewer | `pc ide open --with mujoco` |
 
 They are declared together because they are one piece of knowledge. A reader and
 a writer of the same format disagree the moment they are maintained apart, and

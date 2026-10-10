@@ -7,7 +7,7 @@
 #   export:      write a PartCAD scene or assembly out as an MJCF model
 #   import:      read an MJCF model back in as a PartCAD scene or assembly
 #   simulation:  run one in MuJoCo and say where everything ended up
-#   open:        open one in the MuJoCo viewer (`pc open --with mujoco`)
+#   open:        open one in the MuJoCo viewer (`pc ide open --with mujoco`)
 #
 # They are declared together because they are one piece of knowledge. A reader
 # and a writer of the same format disagree the moment they are maintained apart,
@@ -113,7 +113,7 @@ docs:
     pc sim -a stack                          # run it and check the validation
     pc sim --json -a stack                   # and print everything MuJoCo reported
     pc export -t sim-mujoco:mjcf -a stack    # write the model out
-    pc open --with mujoco stack.xml          # and look at it
+    pc ide open --with mujoco stack.xml      # and look at it
     ```
 
     Any parameter of the simulation can be set per run without a plugin of its
@@ -130,8 +130,8 @@ export:
     desc: |
       MJCF, the XML MuJoCo describes a model in: an `.xml` file plus the mesh
       files it references. It is the format a scene or an assembly is handed to
-      a MuJoCo simulation in, and it is what `pc open --with mujoco` converts a
-      scene to before opening it.
+      a MuJoCo simulation in, and it is what `pc ide open --with mujoco`
+      converts a scene to before opening it.
 
       It is handed the assembly *tree* itself rather than the geometry it
       decodes to (`decode: false`) -- one body per object placed in the scene,
