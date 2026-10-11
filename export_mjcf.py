@@ -299,6 +299,15 @@ def write_inertial(body, values):
         inertial.set("diaginertia", mujoco_common.format_numbers([1e-6, 1e-6, 1e-6]))
 
 
+def _positive(value):
+    """'value' as a positive finite float, or None."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0.0 else None
+
+
 def physics_of(node, state):
     """What PartCAD says about the physics of the part behind one node of the tree."""
     return (state["properties"].get(node.get("name")) or {}).get("physics") or {}
@@ -310,7 +319,9 @@ def emit_geom(body, shape_node, placement, asset_name, physics, weighed, state, 
     'weighed' says whether the body has an ``<inertial>``. One that has not is
     one PartCAD could not weigh -- a mesh with no solid in it -- and MuJoCo
     weighs it instead, from the mesh, at the density PartCAD resolved for the
-    part: its own, its material's, or the export's.
+    part: its own, its material's, or the export's. PartCAD resolves one for
+    every part it exports, so a geom without a usable one is reported rather
+    than left to MuJoCo's default of water's, which nobody chose.
     """
     geom = ElementTree.SubElement(body, "geom")
     geom.set("name", state["geom_names"].take("%s_geom_%d" % (body.get("name"), index), "geom"))
@@ -328,9 +339,15 @@ def emit_geom(body, shape_node, placement, asset_name, physics, weighed, state, 
         geom.set("rgba", rgba)
 
     if not weighed:
-        density = (properties.get("physics") or {}).get("density")
-        if density is not None and float(density) > 0.0:
-            geom.set("density", mujoco_common.format_numbers([float(density)], 6))
+        stated = (properties.get("physics") or {}).get("density")
+        density = _positive(stated)
+        if density is not None:
+            geom.set("density", mujoco_common.format_numbers([density], 6))
+        else:
+            state["warnings"].append(
+                "The geom '%s' has no mass PartCAD could work out and no usable density (%r); "
+                "MuJoCo will weigh its mesh at its own default of 1000 kg/m^3" % (geom.get("name"), stated)
+            )
 
     for name, (attribute, render) in GEOM_PHYSICS.items():
         if name not in physics:

@@ -800,6 +800,22 @@ def test_a_mesh_partcad_could_not_weigh_is_weighed_by_mujoco_at_its_density(expo
     assert _densities(mujoco) == {"scan_geom_0": "2200"}
 
 
+@pytest.mark.parametrize("physics", [{}, {"density": 0.0}, {"density": -5.0}, {"density": "heavy"}])
+def test_a_geom_with_no_usable_density_is_reported_not_left_to_mujoco_s_default(export_mjcf, tmp_path, physics):
+    """PartCAD resolves a density for every part it exports; one without it is a defect worth seeing.
+
+    MuJoCo would weigh such a mesh at water's 1000 kg/m^3, which nobody chose,
+    so the geom is written without a density and the export says so.
+    """
+    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:scan", "scan", b"SCAN")]}
+    properties = {"//p:scan": {"physics": physics}}
+
+    result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, properties=properties)
+
+    assert _densities(mujoco) == {"scan_geom_0": None}
+    assert any("scan_geom_0" in warning and "1000 kg/m^3" in warning for warning in result["warnings"])
+
+
 def test_a_property_mjcf_cannot_state_is_reported_rather_than_lost(export_mjcf, tmp_path):
     root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
     properties = {"//p:cube": {"physics": {"selfCollide": True}}}
