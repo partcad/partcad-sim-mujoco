@@ -248,8 +248,15 @@ simulation:
     # oldest and most stable API, unchanged across the whole of 3.x. So the
     # ceiling is the next major version rather than a release nobody has seen
     # yet.
+    #
+    # Less one release: 3.15.0 ships no CPython 3.11 wheel for linux-aarch64
+    # (3.14.0 did), and the sdist pip falls back to cannot build without a
+    # MuJoCo installation of its own ("MUJOCO_PATH environment variable is not
+    # set"). Excluding it lets pip take 3.14.0 there and keeps every other
+    # platform on the newest release; a later 3.x that restores the wheel is
+    # picked up without another change here.
     pythonRequirements:
-      - mujoco>=3.2,<4
+      - mujoco>=3.2,<4,!=3.15.0
     # The format the scene is handed over in, resolved in this package: the
     # `export:` entry above is what writes it. PartCAD exports the scene before
     # this script is started, so this is what decides which exporter runs rather
