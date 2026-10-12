@@ -44,8 +44,8 @@ desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 # body's shapes up with. An older PartCAD hands it parts with no mass worked out
 # and no helper to add them up with, and refuses this package rather than write
 # a model of weightless bodies.
-# TODO: set to the release partcad/partcad#755 lands in, if that is not this one.
-partcad: ">=0.8.169"
+# 0.8.174 is the release partcad/partcad#755 landed in.
+partcad: ">=0.8.174"
 
 docs:
   intro: |
