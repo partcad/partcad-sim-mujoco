@@ -49,9 +49,8 @@ desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 # worked out from. #757 shipped in 0.8.175. And it needs where each solid is
 # lifted from - its 'centerOfVolume', with 'mass_properties.displacement_of()' -
 # which the righting moment of a ballasted body is worked out from
-# (partcad/partcad#763).
-# TODO: set to the release partcad/partcad#763 lands in.
-partcad: ">=0.8.178"
+# (partcad/partcad#763, released in 0.8.180).
+partcad: ">=0.8.180"
 
 docs:
   intro: |
