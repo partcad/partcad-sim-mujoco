@@ -29,8 +29,14 @@ description of a scene ever had to say, and so all that can be compared against
 it. A plugin that needs to say more (a force, a temperature, a contact history)
 states it beside 'before' and 'after' in its own vocabulary; see
 'wrappers/wrapper_simulate.py' in PartCAD itself, which is what runs this.
+
+A model with joints in it says one more thing, and the reading says it too:
+where each joint is and how fast it is moving, as ``joints`` beside ``bodies``,
+in the terms of the ``motion:`` an interface declares -- degrees for a turn,
+millimetres for a move. See 'joints' below.
 """
 
+import math
 import os
 import sys
 
@@ -45,19 +51,27 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # reach into it.
 MM_PER_M = 1000.0
 
+# Degrees per radian. MuJoCo computes every angle in radians, whatever the
+# model's '<compiler angle=...>' said the file was written in; PartCAD states a
+# turn in degrees, as the 'motion:' of an interface does, its limits included.
+DEG_PER_RAD = 180.0 / math.pi
+
 # MuJoCo's own viewer shows geom groups 0 to 2 and hides the rest, and models
 # put what is only there to collide - a convex hull, a simplified proxy - in a
 # group above those. The snapshots show what MuJoCo's viewer would.
 VISIBLE_GROUPS = 3
 
 
-def snapshot(mujoco, model, data):
-    """Where every body is right now, keyed by the name the MJCF gave it.
+def snapshot(mujoco, model, data, scratch):
+    """Where every body and every joint is right now, by the names the MJCF gave them.
 
     The world body is left out: it is body 0 of every model, it is the frame
     everything else is stated in, and it never moves. What is left is exactly
     the bodies PartCAD's exporter wrote out of the scene, under the names it
     gave them - which is what makes a validation expression readable.
+
+    'scratch' is an 'MjData' of the same model that 'joints' may overwrite, or
+    None for a model that has no joint to report.
     """
     bodies = {}
     for index in range(1, model.nbody):
@@ -68,7 +82,110 @@ def snapshot(mujoco, model, data):
             "pos": [float(v) * MM_PER_M for v in data.xpos[index]],
             "quat": [float(v) for v in data.xquat[index]],
         }
-    return {"time": float(data.time), "bodies": bodies}
+    return {"time": float(data.time), "bodies": bodies, "joints": joints(mujoco, model, data, scratch)}
+
+
+def joints(mujoco, model, data, scratch):
+    """Where every joint is and how fast it moves, keyed by the name the MJCF gave it.
+
+    Stated in PartCAD's vocabulary rather than MuJoCo's: the one the 'motion:'
+    of an interface is written in, which is what a joint in a model PartCAD
+    exported came from, and what a validation of it is written against.
+
+      revolute,   'pos' in degrees, 'vel' in degrees per second, 'effort' in
+      continuous  N*m. Both are a MuJoCo hinge: 'revolute' when it is limited
+                  and 'continuous' when it is not, which is the line PartCAD
+                  (and URDF) draws between the two.
+      prismatic   'pos' in millimetres, 'vel' in millimetres per second,
+                  'effort' in N. A MuJoCo slide.
+      ball        'quat' (w x y z), the turn away from where the model placed
+                  the body; 'vel', the angular velocity [x, y, z] in degrees per
+                  second about the axes of the body's own frame (MuJoCo's own
+                  frame for it); 'effort', [x, y, z] in N*m in the same frame.
+
+    'pos' is the joint's own coordinate, so it is zero where the model placed
+    the body -- or the joint's 'ref', for a model that states one -- and not an
+    angle against anything else. A pendulum written out horizontal reads 0
+    there and a quarter turn, 90 one way or the other, hanging down.
+
+    'effort' is what the model's actuators exert along the joint: MuJoCo's
+    'qfrc_actuator', gear ratio and force limits applied, which is the quantity
+    an interface's 'maxEffort' bounds. It is zero for a joint nothing drives,
+    and that is every joint until a model has actuators. It is deliberately not
+    the constraint force -- what a limit pushes back with, or what the joint
+    transmits from one body to the other: those are reactions, a validation of
+    whether a motor was strong enough asks about the action, and the constraint
+    force on a degree of freedom mixes contacts, limits and equalities into one
+    number that is none of them.
+
+    A free joint is left out. It is how a body that is free to move is written
+    -- which, in a scene PartCAD exported for a simulation, is every body -- and
+    its coordinate is exactly the body's position and orientation, which
+    'bodies' already states, in the same units.
+
+    A joint the MJCF did not name is reported as 'joint_<n>', 'n' being its
+    index in the compiled model: the same rule 'bodies' follows, and the one
+    name that does not depend on the order anything else was read in.
+    """
+    reported = reported_joints(mujoco, model)
+    if not reported:
+        return {}
+
+    # The state at 'time', with everything derived from it worked out afresh.
+    #
+    # After 'mj_step', MuJoCo holds the state the step ended at -- 'qpos',
+    # 'qvel' and 'time' -- but everything it derives, the actuator forces
+    # among them, from whatever it evaluated to take the step: the state the
+    # step started from under the Euler integrators, and an intermediate
+    # stage under RK4. Reading 'qfrc_actuator' as it stands would state an
+    # effort from up to a step ago beside a position from now. So the state
+    # is copied and evaluated on its own, which touches neither the run nor
+    # what the bodies are read from.
+    #
+    # The bodies are not read from here, deliberately. They are read from the
+    # run itself and so lag 'time' by up to a step, as they always have, and
+    # moving them onto it changes what every existing validation is handed: a
+    # change of its own, which would put a reading's bodies and its joints on
+    # the same instant.
+    mujoco.mj_copyData(scratch, model, data)
+    mujoco.mj_forward(model, scratch)
+    qpos, qvel, effort = scratch.qpos, scratch.qvel, scratch.qfrc_actuator
+
+    reading = {}
+    for index in reported:
+        kind = model.jnt_type[index]
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, index)
+        if not name:
+            name = "joint_%d" % index
+        at = model.jnt_qposadr[index]
+        dof = model.jnt_dofadr[index]
+        if kind == mujoco.mjtJoint.mjJNT_HINGE:
+            reading[name] = {
+                "type": "revolute" if model.jnt_limited[index] else "continuous",
+                "pos": float(qpos[at]) * DEG_PER_RAD,
+                "vel": float(qvel[dof]) * DEG_PER_RAD,
+                "effort": float(effort[dof]),
+            }
+        elif kind == mujoco.mjtJoint.mjJNT_SLIDE:
+            reading[name] = {
+                "type": "prismatic",
+                "pos": float(qpos[at]) * MM_PER_M,
+                "vel": float(qvel[dof]) * MM_PER_M,
+                "effort": float(effort[dof]),
+            }
+        elif kind == mujoco.mjtJoint.mjJNT_BALL:
+            reading[name] = {
+                "type": "ball",
+                "quat": [float(v) for v in qpos[at : at + 4]],
+                "vel": [float(v) * DEG_PER_RAD for v in qvel[dof : dof + 3]],
+                "effort": [float(v) for v in effort[dof : dof + 3]],
+            }
+    return reading
+
+
+def reported_joints(mujoco, model):
+    """The joints 'joints' reports, by index: every one but a free one."""
+    return [index for index in range(model.njnt) if model.jnt_type[index] != mujoco.mjtJoint.mjJNT_FREE]
 
 
 def geometry(mujoco, model, data):
@@ -176,7 +293,13 @@ def process(path, request):
     # everything derived from that, without advancing time: this is the state
     # the scene described, which is what 'before' has to be.
     mujoco.mj_forward(model, data)
-    before = snapshot(mujoco, model, data)
+    # Where the joints' efforts are worked out, so that working them out
+    # touches neither the run nor what the bodies are read from; see 'joints'.
+    # Not even made for a model with no joint to report -- a model of free
+    # bodies, which is every scene PartCAD exports today -- so that one costs
+    # exactly what it did.
+    scratch = mujoco.MjData(model) if reported_joints(mujoco, model) else None
+    before = snapshot(mujoco, model, data, scratch)
     # What PartCAD would like a picture of, and what the scene looks like now,
     # for the first of them. Read now because by the end it has moved.
     pictures = request.get("snapshot")
@@ -192,10 +315,10 @@ def process(path, request):
         mujoco.mj_step(model, data)
         steps += 1
         if next_sample is not None and data.time >= next_sample:
-            trace.append(snapshot(mujoco, model, data))
+            trace.append(snapshot(mujoco, model, data, scratch))
             next_sample += duration / (samples + 1)
 
-    after = snapshot(mujoco, model, data)
+    after = snapshot(mujoco, model, data, scratch)
     if pictures:
         looks["after"] = look(mujoco, model, data, warnings)
 

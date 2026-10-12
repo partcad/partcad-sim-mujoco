@@ -7,7 +7,7 @@
 #   export:      write a PartCAD scene or assembly out as an MJCF model
 #   import:      read an MJCF model back in as a PartCAD scene or assembly
 #   simulation:  run one in MuJoCo and say where everything ended up
-#   open:        open one in the MuJoCo viewer (`pc open --with mujoco`)
+#   open:        open one in the MuJoCo viewer (`pc ide open --with mujoco`)
 #
 # They are declared together because they are one piece of knowledge. A reader
 # and a writer of the same format disagree the moment they are maintained apart,
@@ -72,6 +72,27 @@ docs:
     is written by whoever wrote the part, against the numbers that part is
     drawn in.
 
+    Beside `bodies`, each reading carries a `joints` object: one entry per
+    joint of the model, by the name the MJCF gives it, stated the way an
+    interface's `motion:` is -- degrees for a turn, millimetres for a move:
+
+    | `type` | in MJCF | `pos` | `vel` | `effort` |
+    | --- | --- | --- | --- | --- |
+    | `revolute` | a hinge with a `range` | degrees | deg/s | N·m |
+    | `continuous` | a hinge without one | degrees | deg/s | N·m |
+    | `prismatic` | a slide | mm | mm/s | N |
+    | `ball` | a ball | `quat` (`w x y z`) instead | `[x, y, z]` deg/s | `[x, y, z]` N·m |
+
+    `pos` is the joint's own coordinate, zero where the model placed the body
+    (or at the joint's `ref`). A ball joint's `vel` is about the axes of the
+    body's own frame. `effort` is what the model's actuators exert along the
+    joint -- the quantity an interface's `maxEffort` bounds -- and is zero for
+    a joint nothing drives. A free joint is not listed, because its
+    coordinate is the body's pose and `bodies` states that already; so a
+    model of free bodies, which is every scene PartCAD exports today, reports
+    `joints: {}`, and a validation can walk `after["joints"]` without asking
+    first whether there is one.
+
     Nothing has to be installed by hand: PartCAD installs this package's Python
     requirements into the sandbox it runs each implementation in, so a machine
     with no MuJoCo on it simulates just the same.
@@ -129,7 +150,7 @@ docs:
     pc sim -a stack                          # run it and check the validation
     pc sim --json -a stack                   # and print everything MuJoCo reported
     pc export -t sim-mujoco:mjcf -a stack    # write the model out
-    pc open --with mujoco stack.xml          # and look at it
+    pc ide open --with mujoco stack.xml      # and look at it
     ```
 
     Any parameter of the simulation can be set per run without a plugin of its
@@ -146,8 +167,10 @@ export:
     desc: |
       MJCF, the XML MuJoCo describes a model in: an `.xml` file plus the mesh
       files it references. It is the format a scene or an assembly is handed to
-      a MuJoCo simulation in, and it is what `pc open --with mujoco` converts a
-      scene to before opening it.
+      a MuJoCo simulation in, and the only one `pc ide open --with mujoco`
+      opens: a scene in any other format is refused rather than converted,
+      and this export is how to get one MuJoCo can open
+      (`pc export -S -t sim-mujoco:mjcf`).
 
       It is handed the assembly *tree* itself rather than the geometry it
       decodes to (`decode: false`) -- one body per object placed in the scene,
@@ -266,8 +289,15 @@ simulation:
     # oldest and most stable API, unchanged across the whole of 3.x. So the
     # ceiling is the next major version rather than a release nobody has seen
     # yet.
+    #
+    # Less one release: 3.15.0 ships no CPython 3.11 wheel for linux-aarch64
+    # (3.14.0 did), and the sdist pip falls back to cannot build without a
+    # MuJoCo installation of its own ("MUJOCO_PATH environment variable is not
+    # set"). Excluding it lets pip take 3.14.0 there and keeps every other
+    # platform on the newest release; a later 3.x that restores the wheel is
+    # picked up without another change here.
     pythonRequirements:
-      - mujoco>=3.2,<4
+      - mujoco>=3.2,<4,!=3.15.0
     # The format the scene is handed over in, resolved in this package: the
     # `export:` entry above is what writes it. PartCAD exports the scene before
     # this script is started, so this is what decides which exporter runs rather
@@ -310,7 +340,15 @@ open:
     macosApps: [MuJoCo.app]
     macosExecutable: Contents/MacOS/simulate
     windowsGlobs: ["MuJoCo*/bin/simulate.exe", "mujoco*/bin/simulate.exe"]
-    # MuJoCo reads MJCF and no other model format. A scene given as anything
-    # else -- a Gazebo world, above all -- is written out as MJCF first, which
-    # is `pc export -t mjcf` and so is the daemon's work.
+    # MuJoCo reads MJCF and no other model format, and `pc ide open` does not
+    # convert a scene into it: MJCF is written by this package's exporter, and
+    # a file handed to `pc ide open` has no package around it to reach that
+    # through. So it opens a file that already is MJCF -- one stored under an
+    # extension below, or declared `type: sim-mujoco:mjcf` -- and refuses
+    # anything else, a Gazebo world above all, pointing at the export that
+    # writes one: `pc export -S -t sim-mujoco:mjcf`.
     sceneType: mjcf
+    # What a file of `sceneType` is called on disk. Without it a model is MJCF
+    # only when its declared type says so, and `pc ide open --with mujoco
+    # stack.xml` is refused.
+    sceneExtensions: [".xml", ".mjcf"]
