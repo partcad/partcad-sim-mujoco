@@ -245,19 +245,19 @@ export:
       and this export is how to get one MuJoCo can open
       (`pc export -S -t sim-mujoco:mjcf`).
 
-      It is handed the assembly *tree* itself rather than the geometry it
-      decodes to (`decode: false`), and writes the bodies PartCAD's body rule
-      finds in it: every element of a scene a body of its own, everything in an
+      It is written from the assembly *tree* rather than from the geometry it
+      decodes to, and writes the bodies PartCAD's body rule finds in it: every element of a scene a body of its own, everything in an
       assembly welded into one body or jointed to it, each joint as MuJoCo's
       own -- a hinge or a slide per degree of freedom, a ball, and an equality
       for a screw's thread or a `mimic` -- named as PartCAD names it.
     path: export_mjcf.py
     extension: xml
-    # 'decode: false' -- the exporter walks the assembly envelopes itself.
-    # Decoding them into live geometry would keep the tree's shape but drop
-    # every node's name and label and bake its placement in, leaving nothing to
-    # name, group or place the bodies by. See 'wrappers/wrapper_export.py' in
-    # PartCAD itself.
+    # For a PartCAD released before 'shape_tree' only: that is what has it
+    # hand this exporter the tree in 'wrapped' rather than the geometry it
+    # decodes to. A newer PartCAD hands every exporter the tree as 'shape_tree'
+    # beside the geometry, reads no 'decode' at all, and passes this through as
+    # a parameter nothing reads. Drop it once 'partcad:' above requires a
+    # release that hands 'shape_tree'. See 'tree_of()' in export_mjcf.py.
     decode: false
     # OpenCASCADE and nothing else: this is XML and arithmetic, plus the
     # triangulation of what it writes. No MuJoCo is involved in writing a model.
