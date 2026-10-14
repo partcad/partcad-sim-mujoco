@@ -10,13 +10,17 @@ Writes a PartCAD scene -- or an assembly, or any other shape -- as an MJCF
 a model in, and this is the format `pc sim` hands a scene over in: a simulation
 plugin is given a file, and for the MuJoCo plugin that file is this one.
 
-Like PartCAD's URDF exporter, this one is handed the assembly *tree* itself
-rather than the geometry it decodes to -- which is what ``decode: false`` on
-this format's declaration asks for, see 'wrappers/wrapper_export.py' in PartCAD
-itself. Decoding would keep the tree's shape and nothing
-else about it: every node's ``name`` and ``label`` is dropped and its placement
-is baked into the geometry rather than staying readable as data, and the bodies,
-their poses and their properties are built from all three.
+Like PartCAD's URDF exporter, this one writes the assembly *tree* rather than
+the geometry it decodes to: PartCAD hands every exporter that tree as
+``request["shape_tree"]``, beside the geometry in ``request["wrapped"]`` (see
+'wrappers/wrapper_export.py' in PartCAD itself). The geometry keeps the tree's
+shape and nothing else about it: every node's ``name`` and ``label`` is dropped
+and its placement is baked in rather than staying readable as data, and the
+bodies, their poses and their properties are built from all three.
+
+A PartCAD released before 'shape_tree' hands the tree in 'wrapped' instead,
+and only to an exporter that declares ``decode: false`` - which is why this one
+still does, and why both are read: see 'tree_of()'.
 
 Which nodes of the tree are bodies, and how the bodies hang together, is not
 decided here. It is PartCAD's body rule, in PartCAD's own 'kinematics' (see
@@ -345,14 +349,35 @@ class NameAllocator:
         return candidate
 
 
+# Where PartCAD puts a node's own geometry, decoded, on the tree it hands over
+# as 'shape_tree'. Spelled out rather than read off 'ocp_serialize', which only
+# a PartCAD that hands 'shape_tree' defines it in.
+KEY_SHAPE = "shape"
+
+
+def tree_of(request):
+    """The tree to write, as PartCAD handed it over.
+
+    'shape_tree' from a PartCAD that hands every exporter the tree beside the
+    geometry; 'wrapped' from one released before it did, which hands the tree
+    there instead to an exporter that declares 'decode: false'.
+    """
+    tree = request.get("shape_tree")
+    return tree if tree is not None else request.get("wrapped")
+
+
 def node_geometry(node):
     """The node's own shape as a live TopoDS_Shape, in its own frame, or None.
 
-    The placement carried by the node is deliberately left off: it becomes the
-    pose of the element above the geometry, not part of the geometry.
+    Decoded already on a node of 'shape_tree'; decoded here on one of the raw
+    tree an older PartCAD hands over. The placement carried by the node is
+    deliberately left off either way: it becomes the pose of the element above
+    the geometry, not part of the geometry.
     """
     if not ocp_serialize.is_shape_object(node):
         return None
+    if node.get(KEY_SHAPE) is not None:
+        return node[KEY_SHAPE]
     without_placement = {key: value for key, value in node.items() if key != ocp_serialize.KEY_LOCATION}
     return ocp_serialize.decode_shape(without_placement)
 
@@ -1012,7 +1037,7 @@ def write_medium(option, medium):
 
 
 def process(path, request):
-    root = request["wrapped"]
+    root = tree_of(request)
     if not isinstance(root, dict) or not (
         ocp_serialize.is_shape_object(root) or ocp_serialize.is_assembly_object(root)
     ):
