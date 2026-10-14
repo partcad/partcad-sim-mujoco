@@ -55,10 +55,8 @@ desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 # older PartCAD has no such module in its sandbox, and stamps no 'kind' on the
 # tree for the rule to read.
 #
-# TODO: the release #784 ships in. Every merge to PartCAD's 'devel' is a
-# release, so this is a guess at the number until it has merged: 0.8.193 if it
-# is the next one.
-partcad: ">=0.8.193"
+# partcad/partcad#784 shipped in 0.8.194.
+partcad: ">=0.8.194"
 
 docs:
   intro: |
