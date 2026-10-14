@@ -585,7 +585,7 @@ def test_a_scene_becomes_a_model_of_one_body_per_object(export_mjcf, tmp_path):
         "location": [[100.0, 0.0, 0.0], [0.0, 0.0, 1.0], 90.0],
         "assembly": [envelope("//p:cyl", "cylinder", b"CYL", [[0.0, 0.0, 10.0], [0.0, 0.0, 1.0], 0.0])],
     }
-    root = {"name": "//p:bench", "label": "bench", "assembly": [cube, group]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [cube, group]}
 
     result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root)
 
@@ -597,7 +597,12 @@ def test_a_scene_becomes_a_model_of_one_body_per_object(export_mjcf, tmp_path):
 
     group_body = worldbody.findall("body")[1]
     assert group_body.get("pos").split()[0] == "0.1"  # 100 mm -> 0.1 m
-    assert [body.get("name") for body in group_body.findall("body")] == ["cylinder"]
+    # A group placed in a scene is an assembly, and everything in an assembly
+    # is attached to it: one body, holding the cylinder where the group does.
+    assert group_body.findall("body") == []
+    (geom,) = group_body.findall("geom")
+    assert geom.get("mesh") == "cylinder"
+    assert [float(v) for v in geom.get("pos").split()] == pytest.approx([0.0, 0.0, 0.01])
 
     # Meshes in millimetres, referenced with the scale that says so.
     mesh = mujoco.find("asset/mesh[@name='cylinder']")
@@ -609,19 +614,20 @@ def test_a_scene_becomes_a_model_of_one_body_per_object(export_mjcf, tmp_path):
 def test_a_shape_used_twice_is_written_once(export_mjcf, tmp_path):
     cube = envelope("//p:cube", "cube", b"CUBE")
     twin = envelope("//p:cube", "cube", b"CUBE", [[10.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0])
-    root = {"name": "//p:bench", "label": "bench", "assembly": [cube, twin]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [cube, twin]}
 
     result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root)
 
     assert result["meshes"] == ["bench_meshes/cube.stl"]
     assert [mesh.get("name") for mesh in mujoco.findall("asset/mesh")] == ["cube"]
-    # And the two bodies are still told apart.
-    assert [body.get("name") for body in mujoco.findall("worldbody/body")] == ["cube", "cube_1"]
+    # And the two bodies are still told apart, the way PartCAD tells two
+    # bodies of one name apart.
+    assert [body.get("name") for body in mujoco.findall("worldbody/body")] == ["cube", "cube-2"]
 
 
 def test_a_scene_is_welded_to_the_world_unless_told_otherwise(export_mjcf, tmp_path):
     """A scene states where things are, so nothing in it is meant to move."""
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
 
     _result, welded = exported(export_mjcf, tmp_path / "a.xml", root)
     assert welded.find("worldbody/body/freejoint") is None
@@ -630,24 +636,26 @@ def test_a_scene_is_welded_to_the_world_unless_told_otherwise(export_mjcf, tmp_p
     assert free.find("worldbody/body/freejoint") is not None
 
 
-def test_flattening_places_every_shape_in_the_world_at_its_world_pose(export_mjcf, tmp_path):
+def test_every_element_of_a_scene_is_a_body_in_the_world_at_its_world_pose(export_mjcf, tmp_path):
     """What a physics simulation needs: bodies that can move independently.
 
     A body nested in another with no joint between them is one rigid body with
-    it, so a stack of blocks written that way could never fall over.
+    it, so a stack of blocks written that way could never fall over. The
+    elements of a scene inside a scene are bodies of their own too.
     """
     group = {
         "name": "//p:group",
         "label": "group",
+        "kind": "scene",
         "location": [[100.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0],
         "assembly": [
             envelope("//p:a", "a", b"A", [[0.0, 0.0, 10.0], [0.0, 0.0, 1.0], 0.0]),
             envelope("//p:b", "b", b"B", [[0.0, 0.0, 30.0], [0.0, 0.0, 1.0], 0.0]),
         ],
     }
-    root = {"name": "//p:bench", "label": "bench", "assembly": [group]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [group]}
 
-    _result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, flatten=True, static=False)
+    _result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, static=False)
 
     bodies = mujoco.findall("worldbody/body")
     assert [body.get("name") for body in bodies] == ["a", "b"]
@@ -657,9 +665,27 @@ def test_flattening_places_every_shape_in_the_world_at_its_world_pose(export_mjc
     assert [float(v) for v in bodies[1].get("pos").split()] == pytest.approx([0.1, 0.0, 0.03])
 
 
+def test_flatten_is_no_longer_an_option_and_says_so(export_mjcf, tmp_path):
+    """The body rule decides what is a body; a 'flatten' left in a declaration would otherwise mislead."""
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+
+    result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, flatten=True)
+
+    assert any("'flatten' is no longer an option" in warning for warning in result["warnings"])
+    assert [body.get("name") for body in mujoco.findall("worldbody/body")] == ["cube"]
+
+
+def test_this_package_declares_no_flatten():
+    with open(os.path.join(HERE, "partcad.yaml"), encoding="utf-8") as f:
+        declared = yaml.safe_load(f)
+    assert "flatten" not in declared["export"]["mjcf"]
+    assert declared["export"]["mjcf"]["static"] is True
+    assert declared["simulation"]["mujoco"]["formatOptions"] == {"static": False}
+
+
 def test_the_friction_written_is_the_one_the_round_trip_reads_back(export_mjcf, tmp_path, no_occt):
     """Out as MJCF's three-component 'friction', back as PartCAD's one."""
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
     properties = {"//p:cube": {"physics": {"friction": 0.04}}}
     path = tmp_path / "bench.xml"
 
@@ -670,7 +696,7 @@ def test_the_friction_written_is_the_one_the_round_trip_reads_back(export_mjcf, 
 
 
 def test_what_a_part_says_about_itself_is_written_rather_than_recomputed(export_mjcf, tmp_path):
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
     properties = {"//p:cube": {"physics": {"mass": 2.5, "friction": 0.7}, "color": "#FF8000"}}
 
     result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, properties=properties)
@@ -714,7 +740,7 @@ def test_a_body_weighs_what_partcad_says_its_part_weighs(export_mjcf, tmp_path):
     So a model MuJoCo runs weighs what 'pc info' says, and what the URDF and
     SDFormat exports of the same object weigh.
     """
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:ptfe", "ptfe", b"PTFE")]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:ptfe", "ptfe", b"PTFE")]}
     properties = {"//p:ptfe": {"material": ":ptfe", "physics": dict(PTFE_CUBE)}}
 
     result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, properties=properties)
@@ -754,7 +780,7 @@ def test_a_body_of_several_shapes_is_added_up_by_partcad_s_helper(export_mjcf, t
         "label": "wrist",
         "assembly": [envelope("//p:steel", "wrist/1", b"STEEL"), envelope("//p:foam", "wrist/2", b"FOAM", apart)],
     }
-    root = {"name": "//p:arm", "label": "arm", "assembly": [wrist]}
+    root = {"name": "//p:arm", "label": "arm", "kind": "scene", "assembly": [wrist]}
     properties = {"//p:steel": {"physics": steel}, "//p:foam": {"physics": foam}}
 
     _result, mujoco = exported(export_mjcf, tmp_path / "arm.xml", root, properties=properties)
@@ -777,7 +803,7 @@ def test_a_body_that_states_its_own_mass_beats_the_sum_of_its_shapes(export_mjcf
             envelope("//p:b", "wrist/2", b"B", [[50.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
         ],
     }
-    root = {"name": "//p:arm", "label": "arm", "assembly": [wrist]}
+    root = {"name": "//p:arm", "label": "arm", "kind": "scene", "assembly": [wrist]}
     properties = {
         "//p:wrist": {"physics": {"mass": 3.0}},
         "//p:a": {"physics": dict(PTFE_CUBE)},
@@ -791,7 +817,7 @@ def test_a_body_that_states_its_own_mass_beats_the_sum_of_its_shapes(export_mjcf
 
 def test_a_mesh_partcad_could_not_weigh_is_weighed_by_mujoco_at_its_density(export_mjcf, tmp_path):
     """A mesh with no solid in it has no mass PartCAD could work out, and still has a density."""
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:scan", "scan", b"SCAN")]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:scan", "scan", b"SCAN")]}
     properties = {"//p:scan": {"physics": {"density": 2200.0, "friction": 0.04}}}
 
     _result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, properties=properties)
@@ -807,7 +833,7 @@ def test_a_geom_with_no_usable_density_is_reported_not_left_to_mujoco_s_default(
     MuJoCo would weigh such a mesh at water's 1000 kg/m^3, which nobody chose,
     so the geom is written without a density and the export says so.
     """
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:scan", "scan", b"SCAN")]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:scan", "scan", b"SCAN")]}
     properties = {"//p:scan": {"physics": physics}}
 
     result, mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, properties=properties)
@@ -817,7 +843,7 @@ def test_a_geom_with_no_usable_density_is_reported_not_left_to_mujoco_s_default(
 
 
 def test_a_property_mjcf_cannot_state_is_reported_rather_than_lost(export_mjcf, tmp_path):
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
     properties = {"//p:cube": {"physics": {"selfCollide": True}}}
 
     result, _mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, properties=properties)
@@ -826,7 +852,7 @@ def test_a_property_mjcf_cannot_state_is_reported_rather_than_lost(export_mjcf, 
 
 
 def test_the_light_and_the_ground_are_what_makes_the_file_usable(export_mjcf, tmp_path):
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
 
     _result, with_both = exported(export_mjcf, tmp_path / "a.xml", root)
     assert with_both.find("worldbody/light") is not None
@@ -838,7 +864,7 @@ def test_the_light_and_the_ground_are_what_makes_the_file_usable(export_mjcf, tm
 
 
 def test_ascii_stl_is_reported_because_mujoco_cannot_read_it(export_mjcf, tmp_path):
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
 
     result, _mujoco = exported(export_mjcf, tmp_path / "bench.xml", root, ascii=True)
 
@@ -850,6 +876,7 @@ def test_a_parameterized_name_does_not_become_the_model_name(export_mjcf, tmp_pa
     root = {
         "name": "//p:subject;subject=//p:block,subject_kind=part",
         "label": "subject;subject=//p:block,subject_kind=part",
+        "kind": "scene",
         "assembly": [envelope("//p:cube", "cube", b"CUBE")],
     }
 
@@ -889,7 +916,7 @@ FLOAT_CUBE = dict(
 
 
 def one_cube():
-    return {"name": "//p:tank", "label": "tank", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    return {"name": "//p:tank", "label": "tank", "kind": "scene", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
 
 
 def resolved(physics):
@@ -972,7 +999,7 @@ def test_a_body_of_several_shapes_displaces_what_all_of_them_enclose(export_mjcf
         "label": "wrist",
         "assembly": [envelope("//p:a", "wrist/1", b"A"), envelope("//p:b", "wrist/2", b"B", apart)],
     }
-    root = {"name": "//p:arm", "label": "arm", "assembly": [wrist]}
+    root = {"name": "//p:arm", "label": "arm", "kind": "scene", "assembly": [wrist]}
     properties = {"//p:a": {"physics": dict(ALUMINIUM_CUBE)}, "//p:b": {"physics": dict(FLOAT_CUBE)}}
 
     _result, mujoco = exported(export_mjcf, tmp_path / "a.xml", root, world={"medium": WATER}, properties=properties)
@@ -1074,7 +1101,7 @@ def keeled(export_mjcf, monkeypatch, tmp_path, name, keel_offset, centres=True):
             envelope("//p:keel", "boat/keel", b"KEEL", [[0.0, 0.0, keel_offset], [0.0, 0.0, 1.0], 0.0]),
         ],
     }
-    root = {"name": "//p:tank", "label": "tank", "assembly": [boat]}
+    root = {"name": "//p:tank", "label": "tank", "kind": "scene", "assembly": [boat]}
     # Together they weigh 1.4 g against 2 g of water displaced, so the boat
     # rises; the keel is six times as heavy as the hull, so it balances near it.
     properties = {"//p:hull": {"physics": cube(0.0002)}, "//p:keel": {"physics": cube(0.0012)}}
@@ -1083,7 +1110,6 @@ def keeled(export_mjcf, monkeypatch, tmp_path, name, keel_offset, centres=True):
         export_mjcf,
         path,
         root,
-        flatten=False,
         static=False,
         properties=properties,
         world={"medium": WATER},
@@ -1160,6 +1186,7 @@ def test_what_floats_rises_and_what_does_not_sinks(export_mjcf, monkeypatch, tmp
     root = {
         "name": "//p:tank",
         "label": "tank",
+        "kind": "scene",
         "assembly": [
             envelope("//p:float", "float", b"FLOAT", [[0.0, 0.0, 100.0], [0.0, 0.0, 1.0], 0.0]),
             envelope("//p:sinker", "sinker", b"SINKER", [[50.0, 0.0, 100.0], [0.0, 0.0, 1.0], 0.0]),
@@ -1181,7 +1208,7 @@ def test_what_floats_rises_and_what_does_not_sinks(export_mjcf, monkeypatch, tmp
 
     def run(name, **world):
         path = tmp_path / name
-        exported(export_mjcf, path, root, flatten=True, static=False, properties=properties, **world)
+        exported(export_mjcf, path, root, static=False, properties=properties, **world)
         result = simulate_mujoco.process(str(tmp_path), {"scene_file": str(path), "duration": 2.0})
         moved = {}
         for body in ("float", "sinker"):
@@ -1266,6 +1293,7 @@ def tilted_stack(export_mjcf, monkeypatch, tmp_path, name, mu, tilt=15.0, floor=
     root = {
         "name": "//p:stack",
         "label": "stack",
+        "kind": "scene",
         "assembly": [
             envelope("//p:block", "bottom", b"CUBE", [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
             envelope("//p:block", "top", b"CUBE", [[0.0, 0.0, 10.0], [0.0, 0.0, 1.0], 0.0]),
@@ -1285,7 +1313,6 @@ def tilted_stack(export_mjcf, monkeypatch, tmp_path, name, mu, tilt=15.0, floor=
         export_mjcf,
         path,
         root,
-        flatten=True,
         static=False,
         properties={"//p:block": {"physics": physics}},
         world={"gravity": [9.81 * math.sin(angle), 0.0, -9.81 * math.cos(angle)]},
@@ -1349,6 +1376,7 @@ def test_a_model_written_here_reads_back_as_the_same_arrangement(export_mjcf, tm
     root = {
         "name": "//p:bench",
         "label": "bench",
+        "kind": "scene",
         "assembly": [
             envelope("//p:a", "a", b"A", [[100.0, 0.0, 250.0], [0.0, 0.0, 1.0], 90.0]),
             envelope("//p:b", "b", b"B"),

@@ -5,8 +5,9 @@
 #
 """What a run says about the joints of a model (see 'joints' in 'simulate_mujoco.py').
 
-PartCAD's own exporter writes every body free today, so the models here are
-written by hand: a pendulum on a hinge and the same pendulum on a ball joint, a
+The models here are written by hand, so that what is under test is the reading
+and nothing PartCAD's exporter decides ('test_export_joints.py' is the
+exporter's): a pendulum on a hinge and the same pendulum on a ball joint, a
 carriage falling along a slide and one an actuator holds up, a limited hinge,
 an unnamed one, and a free body.
 

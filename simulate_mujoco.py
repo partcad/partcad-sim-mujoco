@@ -7,8 +7,9 @@
 
 Runs a scene under gravity for a while and says where everything ended up.
 
-The scene arrives as MJCF -- PartCAD exported it, with every body free to move
-and a ground plane under it, under the scene's gravity and in the fluid the
+The scene arrives as MJCF -- PartCAD exported it, with the bodies its body rule
+finds, every one nothing holds free to move and every joint between them
+written, a ground plane under it, under the scene's gravity and in the fluid the
 scene is filled with, if it says either -- so all this does is load the model,
 step it, and
 take the same reading twice: once before anything has moved and once when the
@@ -159,7 +160,11 @@ def joints(mujoco, model, data, scratch):
     'pos' is the joint's own coordinate, so it is zero where the model placed
     the body -- or the joint's 'ref', for a model that states one -- and not an
     angle against anything else. A pendulum written out horizontal reads 0
-    there and a quarter turn, 90 one way or the other, hanging down.
+    there and a quarter turn, 90 one way or the other, hanging down. A model
+    PartCAD wrote states every hinge's and slide's starting value as its 'ref'
+    (see 'write_joint' in 'export_mjcf.py'), so there the reading *is* the
+    joint's value as PartCAD states it: nought at PartCAD's zero, and before
+    anything moves the 'toParams' the assembly starts at.
 
     'effort' is what the model's actuators exert along the joint: MuJoCo's
     'qfrc_actuator', gear ratio and force limits applied, which is the quantity
@@ -172,8 +177,8 @@ def joints(mujoco, model, data, scratch):
     number that is none of them.
 
     A free joint is left out. It is how a body that is free to move is written
-    -- which, in a scene PartCAD exported for a simulation, is every body -- and
-    its coordinate is exactly the body's position and orientation, which
+    -- which, in a scene PartCAD exported for a simulation, is every body
+    nothing holds -- and its coordinate is exactly the body's position and orientation, which
     'bodies' already states, in the same units.
 
     A joint the MJCF did not name is reported as 'joint_<n>', 'n' being its
@@ -355,8 +360,8 @@ def process(path, request):
     # Where the joints' efforts are worked out, so that working them out
     # touches neither the run nor what the bodies are read from; see 'joints'.
     # Not even made for a model with no joint to report -- a model of free
-    # bodies, which is every scene PartCAD exports today -- so that one costs
-    # exactly what it did.
+    # bodies, which is what a scene of parts is -- so that one costs exactly
+    # what it did.
     scratch = mujoco.MjData(model) if reported_joints(mujoco, model) else None
     before = snapshot(mujoco, model, data, scratch)
     # What PartCAD would like a picture of, and what the scene looks like now,

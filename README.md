@@ -74,9 +74,10 @@ pc convert scene -t sim-mujoco:mjcf bench    # and write it back out
 
 ## What a run reports
 
-PartCAD exports the scene as MJCF with every
-body free to move and a ground plane under it, hands this package the file, and
-this package steps the model for `duration` seconds of simulated time. It then
+PartCAD exports the scene as MJCF -- every body
+nothing holds free to move, every joint written (see [Mechanisms](#mechanisms))
+and a ground plane under it -- hands this package the file, and this package
+steps the model for `duration` seconds of simulated time. It then
 reports where every body was at the start and at the end:
 
 ```json
@@ -115,7 +116,9 @@ joint and stated the way an interface's `motion:` is: **degrees** for a turn,
 
 * **`pos`** is the joint's own coordinate: zero where the model placed the body,
   or at the joint's `ref` where it states one. A pendulum written out
-  horizontal reads 0 there and 90, one way or the other, hanging down.
+  horizontal reads 0 there and 90, one way or the other, hanging down. A model
+  this package's exporter wrote states every hinge's and slide's starting value
+  as its `ref`, so there `pos` is the joint's value as PartCAD states it.
 * A ball joint's **`quat`** is its turn away from where the model placed the
   body, and its `vel` is the angular velocity about the axes of the body's own
   frame — MuJoCo's own convention for it.
@@ -127,9 +130,8 @@ joint and stated the way an interface's `motion:` is: **degrees** for a turn,
   the action.
 * A **free joint** is not listed. Its coordinate is the body's own position and
   orientation, which `bodies` states already, in the same units. So a model of
-  free bodies — every scene PartCAD exports today — reports `"joints": {}`, and
-  a validation can walk `after["joints"]` without asking first whether it is
-  there.
+  free bodies — a scene of parts — reports `"joints": {}`, and a validation can
+  walk `after["joints"]` without asking first whether it is there.
 * A joint the MJCF does not name is `joint_<n>`, `n` being its index in the
   compiled model: the rule `bodies` follows.
 * Joints are read at exactly `time`. Bodies are read where MuJoCo last
@@ -153,6 +155,84 @@ judgement in that sentence belongs to the package being simulated.
 Nothing has to be installed by hand. PartCAD installs this package's Python
 requirements into the sandbox it runs the implementation in, so a machine with
 no MuJoCo on it simulates just the same.
+
+## Mechanisms
+
+Which parts of a scene are one rigid body, and which move against which, is not
+this package's decision. It is PartCAD's **body rule**, in PartCAD's own
+`kinematics` module, which the exporter calls and writes the answer of: every
+element of a scene is a body of its own, everything inside an assembly is
+attached to it — welded into one body, whose mass and inertia are its parts'
+added up — and a connection that keeps a degree of freedom (`motion:` on an
+interface, a mating or the connection) is a **joint**. An assembly placed in a
+scene is one tree of bodies, nested in the MJCF as it hangs together, with its
+root free; a scene element marked `fixed: true` is welded to the world.
+
+Each joint is written as MuJoCo's own, by what `kinematics` classifies it as:
+
+| The joint is | In MJCF |
+| --- | --- |
+| one turn, limited (`revolute`) | a `hinge` with a `range` |
+| one turn, unlimited (`continuous`) | a `hinge` without one |
+| one move (`prismatic`) | a `slide` |
+| a turn and a move on one axis (`cylindrical`) | a `hinge` and a `slide` |
+| the same, coupled by a thread (`screw`) | a `hinge`, a `slide` and an `<equality><joint polycoef>` |
+| two turns through a point (`universal`) | two `hinge`s |
+| three turns through a point (`ball`) | a `ball` at the point |
+| two moves and the turn about their normal (`planar`) | two `slide`s and a `hinge` |
+| all six (`floating`) | three `slide`s and a `ball`: a `<freejoint>` is allowed only directly in the `<worldbody>` |
+| anything else (`chain`) | its freedoms in order, a `hinge` or a `slide` each, in the one body |
+
+* **Names.** A joint written as one MJCF joint has exactly the name PartCAD
+  gives it — `<child link>-<target link>`, or the connection's `joint:` — so a
+  validation reads `after["joints"]["shoulder_pan"]`. One written as several
+  names each after the parameter it is: `nut-bolt.turnZ`, `nut-bolt.moveZ`, and
+  a floating joint's `….ball`. A body is named as PartCAD names it: after the
+  link that placed it, `leg`, `leg-2`.
+* **Where it starts.** Every body is written where the assembly shows it — at
+  the joints' starting values, `toParams` — and every hinge's and slide's `ref`
+  is that value, so MuJoCo's zero is PartCAD's zero and a reading of the joint
+  is its value as PartCAD states it. `pos` and `axis` are in the body the joint
+  moves, as MJCF states them. A ball has no `ref`: it starts at the
+  orientation the body is written in, and reads its turn away from it.
+* **Limits.** A freedom's bounds are its `range`, in degrees for a hinge
+  (`<compiler angle="degree">`, which every model this package writes says) and
+  metres for a slide; unlimited is `limited="false"` and no range. A bound on
+  one side only is written with the other a million degrees (or a kilometre)
+  away, since a range has two ends. An MJCF ball can bound only the whole angle
+  it turns through, so a ball's three turns' limits are reported, not written.
+* **Couplings.** A screw's move follows its turn by its `threadStep`, and a
+  `mimic` follows another joint; both are an `<equality><joint>` whose
+  `polycoef` is the ratio in MuJoCo's own units (radians and metres) about the
+  two `ref`s. It is written with the coefficient of at least one — "the hinge
+  follows the slide by 628 radians a metre" rather than "the slide follows the
+  hinge by 1.6 mm a radian" — because MuJoCo softens an equality by the two
+  joints' inverse inertia, without the coefficient: written the other way, a nut
+  on a 10 mm thread fell 800 mm and turned a quarter turn. A `mimic` between
+  joints of more than one freedom is reported, not written.
+* **Contacts.** The two bodies of a joint are kept from colliding with each
+  other (`<contact><exclude>`): a pin sits in its bore by design, and MuJoCo
+  collides each body with the *convex hull* of the other's mesh, which fills the
+  bore. MuJoCo filters a child's contacts with its parent of its own accord, but
+  not where the parent is welded to the world — a pendulum's frame, a robot
+  bolted down.
+* **What moving it costs.** A joint's `physics:` is written per unit of its own
+  motion in SI, which is what MuJoCo takes: `damping` (N·m·s/rad, N·s/m) as
+  `damping`, `friction` (N·m, N) as `frictionloss`, `springStiffness` as
+  `stiffness` and `springReference` as `springref`. A screw's coupled move gets
+  none, since its turn already pays for it. **Not written**, and listed as
+  unsupported: `maxEffort` — MJCF's `actuatorfrcrange` clamps what *actuators*
+  apply, and a model PartCAD writes has none — `maxVelocity` (MuJoCo limits no
+  joint's velocity), `softLimits`, and the ODE solver settings URDF's
+  `<gazebo>` carries. Nothing is written for MJCF's `armature` either: it is a
+  motor's rotor inertia, and PartCAD's joints state none.
+
+Two export options decide the rest:
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `static` | `true` | Weld every body nothing holds to the world: a file written to be looked at keeps the scene where it was drawn. Joints inside an assembly are written either way, so a pendulum opened in MuJoCo's viewer still swings. The simulation asks for `static: false`, which gives each such body a `<freejoint>`. |
+| `flatten` | — | Gone. It made every node holding geometry a free body of its own, which the body rule now says of every element of a scene and of nothing inside an assembly. Passing it is reported. |
 
 ## Snapshots
 
@@ -376,6 +456,15 @@ It needs no MuJoCo, because reading and writing a model do not involve one.
 runs the simulation end to end — a stack whose top block falls off, drawn
 before and after. That half is skipped where MuJoCo is not installed; CI
 installs it.
+
+`test_export_joints.py` exports the trees PartCAD itself builds for every kind
+of joint — a package of cubes composed by PartCAD's own ASSY code, with a
+stand-in for each part's geometry — loads each in MuJoCo, and checks that every
+body is where PartCAD's `kinematics` says, at the joints' `ref` and moved away
+from it. It checks the physics against closed forms too: a 300 mm bar on a
+revolute joint released horizontal passes the bottom at √(2·m·g·d / I) and,
+swinging 5°, has the period 2π·√(I / (m·g·d)); a carriage on a slide falls
+½·g·t²; a nut on a screw turns as its thread says.
 
 `test_joints.py` runs a hand-written model — a pendulum on a hinge and on a
 ball joint, a carriage on a slide, one an actuator holds up — and checks the
