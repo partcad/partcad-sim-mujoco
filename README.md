@@ -273,6 +273,49 @@ of one `simulate:` entry (per simulation).
 | `timestep` | MuJoCo's | Integration step, in seconds. |
 | `gravity` | the scene's | m/s², in the scene's frame. Overrides the scene's `gravity:` for this run; unset, the run is under the scene's, or MuJoCo's `[0, 0, -9.81]` when the scene states none. |
 | `samples` | `0` | Report the state at this many evenly spaced instants too, as `samples`. |
+| `timeout` | PartCAD's | Wall-clock seconds the run may take. PartCAD works it out and stops the run when it is spent; see below. |
+
+A run is refused before anything is stepped -- naming the parameter -- when it
+asks for a `duration` or a `timestep` that is not a positive number, a step of
+more than a second, more than 50 million steps (`duration` / `timestep`), or
+more than 10,000 `samples`. Each of those is a typo turning into hours of
+stepping or gigabytes of result, and a run quietly clamped to something else
+would be validated against a run nobody asked for.
+
+## When a run goes wrong
+
+MuJoCo does not stop a model whose state stops being a number. It prints a
+warning once, resets the state, and goes on -- and the clock may stop advancing
+with it, so a run that steps until `duration` never ends, while the state it is
+left in is a finite number that means nothing. A validation of "nothing fell
+over" could pass on it. So every step is checked against MuJoCo's own
+instability warnings (`mjWARN_BADQPOS`, `mjWARN_BADQVEL`, `mjWARN_BADQACC`),
+and a run that diverges fails at once, saying when, and at which joint of which
+body, in MuJoCo's words as well as this plugin's:
+
+```text
+MuJoCo's simulation diverged at t = 0.734 s: the acceleration of joint 'swing' (body 'arm') is not a finite
+number (mjWARN_BADQACC). [...] A smaller 'timestep', an integrator that is more stable for stiff models
+('implicitfast'), and a mass or an inertia that is not near zero are the usual remedies. MuJoCo said: Nan,
+Inf or huge value in QACC at DOF 0. The simulation is unstable. Time = 0.7340.
+```
+
+MuJoCo's warnings are kept for the result rather than printed, so nothing is
+written to a `MUJOCO_LOG.TXT` in the plugin's directory. The ones that do not
+end a run -- out of room for contacts or constraints, an inertia that is not
+physical, a control that is not a number -- are reported in `warnings`.
+
+Two bounds are under that, for a run that will not end for any other reason:
+
+- **Steps.** A run that has taken twice the steps its `duration` takes has been
+  taken back in time, and is stopped.
+- **Wall clock.** PartCAD hands every run its budget as `timeout` (see "When a
+  run hangs or crashes" in PartCAD's simulation guide) and stops the run when it
+  is spent. This script stops a tenth of it earlier -- at least a second, at
+  most thirty -- and says how far it got: `MuJoCo reached 41.2 s of the 600 s
+  asked for in 270.3 s of wall-clock time, and the run's budget is 300 s`.
+  Give a slow run longer with `params: {timeout: ...}`, or shorten its
+  `duration`.
 
 ## Friction is a fact about the material
 
@@ -465,6 +508,13 @@ from it. It checks the physics against closed forms too: a 300 mm bar on a
 revolute joint released horizontal passes the bottom at √(2·m·g·d / I) and,
 swinging 5°, has the period 2π·√(I / (m·g·d)); a carriage on a slide falls
 ½·g·t²; a nut on a screw turns as its thread says.
+
+`test_safety.py` proves each of the nets in "When a run goes wrong" with a
+run that needs it: a stiff pendulum that diverges on its first step (and, run
+without the check, a thousand steps that never get past 10 ms), a run of ten
+thousand simulated seconds under a budget of a second and a half, a run that
+MuJoCo keeps taking back to nought seconds, and every absurd parameter. It needs
+MuJoCo for the runs.
 
 `test_joints.py` runs a hand-written model — a pendulum on a hinge and on a
 ball joint, a carriage on a slide, one an actuator holds up — and checks the

@@ -423,6 +423,20 @@ simulation:
     # as 'samples'. Zero -- the default -- reports only 'before' and 'after',
     # which is what a validation reads.
     samples: 0
+    #
+    # How long a run may take, in wall-clock seconds. Not stated here, so that
+    # it is PartCAD's to work out: the larger of five minutes and ten seconds
+    # for each simulated one, unless a 'simulate:' says 'params: {timeout: ...}'
+    # (or the machine says 'simulation.timeout'). PartCAD hands the answer to the
+    # script as 'timeout' and stops the run when it is spent; MuJoCo runs far
+    # faster than real time, so a run that spends it has gone wrong, and the
+    # script stops itself a little before, saying how far it got.
+    # timeout: 300
+    #
+    # What a run may not be asked for, whatever it states: a 'duration' or a
+    # 'timestep' that is not a positive number, a step of more than a second,
+    # more than 50 million steps, or more than 10,000 'samples'. Each is refused
+    # before anything is stepped, naming the parameter.
     # The two pictures PartCAD asks every run for, of the scene before and
     # after, are not configured here: PartCAD says where they go and where they
     # are taken from (the scene's own 'render: png:' viewpoint) in the request.

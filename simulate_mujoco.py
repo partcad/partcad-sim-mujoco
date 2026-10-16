@@ -37,11 +37,25 @@ A model with joints in it says one more thing, and the reading says it too:
 where each joint is and how fast it is moving, as ``joints`` beside ``bodies``,
 in the terms of the ``motion:`` an interface declares -- degrees for a turn,
 millimetres for a move. See 'joints' below.
+
+**A run that cannot be trusted is not reported as one.** MuJoCo does not stop a
+simulation whose state stops being a number: it says so once, on its console,
+and *resets the state* to where the model started -- so the run goes on, the
+reading at the end is of a model that never moved, and a validation that says
+"nothing fell over" passes. And a run that keeps diverging keeps being reset to
+nought seconds, and never reaches the end. So the run is watched: a state that
+diverges stops it with the time and the joint and body it diverged at (see
+'diverged'), a run is refused before it starts when what it is asked for is
+absurd (see 'run_parameters'), and it is bounded twice over -- by the number of
+steps its duration takes, and by the wall-clock budget PartCAD hands it as
+``timeout``, which it stops a little short of, to say how far it got before
+PartCAD stops it for it (see 'Guard').
 """
 
 import math
 import os
 import sys
+import time
 
 # 'snapshot_raster' is this package's, beside this file. PartCAD runs this
 # script by path, which puts nothing on sys.path for it.
@@ -64,6 +78,235 @@ DEG_PER_RAD = 180.0 / math.pi
 # metres, in the body's own frame. 'export_mjcf.CENTRE_OF_BUOYANCY_PREFIX' is
 # its twin; a test keeps the two the same.
 CENTRE_OF_BUOYANCY_PREFIX = "partcad:centre_of_buoyancy:"
+
+# What a run is when nothing says otherwise, in seconds of simulated time.
+DEFAULT_DURATION = 10.0
+
+# The most steps one run may take, and the most readings it may report. Each is
+# far beyond anything a validation asks for -- fifty million steps is more than a
+# day of simulated time at MuJoCo's own two-millisecond step -- and each is what
+# a typo in 'duration', 'timestep' or 'samples' turns into: a run that steps for
+# hours, or a result of a few gigabytes. Refused before anything is stepped.
+MAX_STEPS = 50_000_000
+MAX_SAMPLES = 10_000
+
+# The longest step taken: a step of more than a second is a typo for one of a
+# millisecond, and MuJoCo would integrate it -- for one step, before diverging.
+MAX_TIMESTEP = 1.0
+
+# How much of the wall-clock budget PartCAD hands the run ('timeout') is left
+# unused, so that the run stops itself and says how far it got before PartCAD
+# stops it and can say only that it did not finish: a tenth of it, at least one
+# second and at most thirty.
+BUDGET_MARGIN = 0.1
+BUDGET_MARGIN_MIN = 1.0
+BUDGET_MARGIN_MAX = 30.0
+
+# The warnings MuJoCo raises when the state it integrates stops being a number
+# -- not a number at all, infinite, or past 1e10 -- and what each one is of. It
+# resets the state when it raises one, and goes on; see 'diverged'. Named
+# rather than numbered, because the numbering is MuJoCo's.
+DIVERGING = (
+    ("mjWARN_BADQPOS", "position", "qpos"),
+    ("mjWARN_BADQVEL", "velocity", "dof"),
+    ("mjWARN_BADQACC", "acceleration", "dof"),
+)
+
+# The warnings that do not end the run, and what each says about its answer.
+# Reported in 'warnings', because a run that hit one is a run whose answer is
+# not quite what it looks like.
+DEGRADING = {
+    "mjWARN_CONTACTFULL": "MuJoCo ran out of room for contacts, so some contacts were not made",
+    "mjWARN_CNSTRFULL": "MuJoCo ran out of room for constraints, so some constraints were not applied",
+    "mjWARN_INERTIA": "a body's inertia is not physical, so MuJoCo could not move it as the model says",
+    "mjWARN_BADCTRL": "a control was not a finite number, so MuJoCo set it to zero",
+}
+
+# The remedies for a model that diverges, in the order they are worth trying.
+DIVERGED_REMEDY = (
+    "A smaller 'timestep', an integrator that is more stable for stiff models ('implicitfast'), and a mass or an"
+    " inertia that is not near zero are the usual remedies"
+)
+
+
+class Diverged(Exception):
+    """MuJoCo's state stopped being a number, so nothing after that instant is a reading."""
+
+
+class OutOfTime(Exception):
+    """The run used up the time it was allowed, in steps or in wall-clock seconds."""
+
+
+def run_parameters(request, model):
+    """The run's duration, timestep and number of samples, or a ValueError saying which is absurd.
+
+    'timestep' is the request's, else the model's own. Refused rather than
+    clamped: a run asked for something it cannot do should say so, and one that
+    quietly did something else would be validated against a run nobody asked
+    for.
+    """
+
+    def number(name, value):
+        if isinstance(value, bool):
+            raise ValueError("'%s' is %r, which is not a number" % (name, value))
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("'%s' is %r, which is not a number" % (name, value))
+        if not math.isfinite(value):
+            raise ValueError("'%s' is %r, which is not a finite number" % (name, value))
+        return value
+
+    duration = request.get("duration")
+    duration = DEFAULT_DURATION if duration is None else number("duration", duration)
+    if duration <= 0:
+        raise ValueError(
+            "'duration' is %g s: a run has to last for some time, or 'before' and 'after' are one reading" % duration
+        )
+
+    timestep = request.get("timestep")
+    timestep = float(model.opt.timestep) if timestep is None else number("timestep", timestep)
+    if timestep <= 0 or timestep > MAX_TIMESTEP:
+        raise ValueError(
+            "'timestep' is %g s: it has to be more than nought and at most %g s (MuJoCo's own is 0.002 s)"
+            % (timestep, MAX_TIMESTEP)
+        )
+
+    steps = math.ceil(duration / timestep)
+    if steps > MAX_STEPS:
+        raise ValueError(
+            "'duration' of %g s at a 'timestep' of %g s is %d steps, more than the %d a run may take."
+            " Shorten the duration or lengthen the step" % (duration, timestep, steps, MAX_STEPS)
+        )
+
+    samples = request.get("samples")
+    samples = 0 if samples is None else number("samples", samples)
+    if samples != int(samples) or samples < 0:
+        raise ValueError("'samples' is %g: it is a number of readings, a whole number from nought up" % samples)
+    samples = int(samples)
+    if samples > min(MAX_SAMPLES, steps):
+        raise ValueError(
+            "'samples' is %d, more than the %d readings a run of %d steps can report"
+            % (samples, min(MAX_SAMPLES, steps), steps)
+        )
+    return duration, timestep, steps, samples
+
+
+def budget_of(request):
+    """The wall-clock seconds PartCAD gives the run ('timeout'), or None for no budget."""
+    value = request.get("timeout")
+    if isinstance(value, bool):
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+class Guard:
+    """What stops a run that will not end: a count of steps and a wall-clock deadline.
+
+    The steps are what the duration takes, and twice that is the bound: a run
+    that has taken more has been taken back to an earlier time, which is what
+    MuJoCo does to a model that diverges. 'diverged' is the precise net; this
+    one is under it.
+
+    The deadline is the budget PartCAD gave the run, less 'BUDGET_MARGIN', from
+    when this script started. PartCAD stops the run itself at the budget -- this
+    is the second line, and the one that can say how far the run got.
+    """
+
+    def __init__(self, request, steps, started=None):
+        started = time.monotonic() if started is None else started
+        budget = budget_of(request)
+        if budget is None:
+            self.budget = self.deadline = None
+        else:
+            margin = min(BUDGET_MARGIN_MAX, max(BUDGET_MARGIN_MIN, BUDGET_MARGIN * budget))
+            self.budget = budget
+            self.deadline = started + (budget - margin if budget > margin else budget / 2.0)
+        self.started = started
+        self.planned = steps
+        self.limit = 2 * steps + 10
+
+    def check(self, steps, simulated, duration):
+        """Raise 'OutOfTime' when the run has taken too many steps or too long."""
+        if steps > self.limit:
+            raise OutOfTime(
+                "MuJoCo took %d steps without reaching %g s (the duration takes %d); it reached %g s"
+                % (steps, duration, self.planned, simulated)
+            )
+        if self.deadline is not None and time.monotonic() > self.deadline:
+            raise OutOfTime(
+                "MuJoCo reached %g s of the %g s asked for in %.1f s of wall-clock time, and the run's budget is %g s:"
+                " it was stopped so that it could say so. Give it longer with 'timeout' in the simulation's"
+                " 'params:', or shorten 'duration'"
+                % (simulated, duration, time.monotonic() - self.started, self.budget)
+            )
+
+
+def warning_index(mujoco, name):
+    """MuJoCo's number for one of its warnings, or None for a MuJoCo that has no such warning."""
+    value = getattr(mujoco.mjtWarning, name, None)
+    return int(value) if value is not None else None
+
+
+def diverged(mujoco, model, data, when):
+    """Raise 'Diverged' if MuJoCo has said that the state stopped being a number.
+
+    'when' is the simulated time the step started at, which is the last instant
+    the state was one: MuJoCo has reset it by the time this is asked. Named by
+    the joint it diverged at and the body that joint moves, which is what a
+    reader can find in the model.
+    """
+    numbers = data.warning.number
+    for name, quantity, kind in DIVERGING:
+        index = warning_index(mujoco, name)
+        if index is None or not numbers[index]:
+            continue
+        where = int(data.warning.lastinfo[index])
+        raise Diverged(
+            "MuJoCo's simulation diverged at t = %g s: the %s of %s is not a finite number (%s). "
+            "MuJoCo resets a model that does this and goes on, so nothing after this instant is a reading. %s"
+            % (when, quantity, located(mujoco, model, kind, where), name, DIVERGED_REMEDY)
+        )
+
+
+def located(mujoco, model, kind, index):
+    """'joint <j> (body <b>)' for a degree of freedom or a position coordinate, by the names the model gives them."""
+    joint = body = None
+    if kind == "dof" and 0 <= index < model.nv:
+        joint, body = int(model.dof_jntid[index]), int(model.dof_bodyid[index])
+    elif kind == "qpos" and 0 <= index < model.nq:
+        for candidate in range(model.njnt):
+            if model.jnt_qposadr[candidate] <= index:
+                joint = candidate
+        if joint is not None:
+            body = int(model.jnt_bodyid[joint])
+    if joint is None:
+        return "coordinate %d" % index
+    joint_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint) or "joint_%d" % joint
+    body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body) or "body_%d" % body
+    return "joint '%s' (body '%s')" % (joint_name, body_name)
+
+
+def degraded(mujoco, data):
+    """What MuJoCo warned about that did not end the run, as sentences for 'warnings'."""
+    said = []
+    for name, meaning in DEGRADING.items():
+        index = warning_index(mujoco, name)
+        if index is not None and data.warning.number[index]:
+            said.append("%s (%s, %d times)" % (meaning, name, int(data.warning.number[index])))
+    return said
+
+
+def not_finite(data):
+    """Whether the state holds a number that is not one, which MuJoCo's own checks may have let by."""
+    import numpy
+
+    return not (numpy.isfinite(data.qpos).all() and numpy.isfinite(data.qvel).all())
+
 
 # MuJoCo's own viewer shows geom groups 0 to 2 and hides the rest, and models
 # put what is only there to collide - a convex hull, a simplified proxy - in a
@@ -328,18 +571,69 @@ def take_snapshots(path, snapshot, scenes, warnings):
         return {}
 
 
+class Console:
+    """What MuJoCo says while it runs, kept for the result rather than printed.
+
+    MuJoCo's own handler prints a warning on standard output and appends it to
+    'MUJOCO_LOG.TXT' in whatever directory the run is in -- which is the
+    plugin's package, and for a package PartCAD fetched, its cached checkout.
+    Kept here, the sentence MuJoCo wrote is what a divergence is reported with,
+    and the file is never written.
+    """
+
+    LIMIT = 20
+
+    def __init__(self, mujoco):
+        self.mujoco = mujoco
+        self.said = []
+        self.previous = None
+        self.listening = False
+
+    def listen(self):
+        get = getattr(self.mujoco, "get_mju_user_warning", None)
+        put = getattr(self.mujoco, "set_mju_user_warning", None)
+        if get is None or put is None:
+            return
+        self.previous = get()
+        put(self.hear)
+        self.listening = True
+
+    def hear(self, message):
+        message = str(message).strip()
+        if message and message not in self.said and len(self.said) < self.LIMIT:
+            self.said.append(message)
+
+    def close(self):
+        if self.listening:
+            self.mujoco.set_mju_user_warning(self.previous)
+            self.listening = False
+
+
 def process(path, request):
+    started = time.monotonic()
     import mujoco
 
-    scene_file = request["scene_file"]
-    duration = float(request.get("duration") or 10.0)
-    samples = int(request.get("samples") or 0)
+    console = Console(mujoco)
+    console.listen()
+    try:
+        return run(mujoco, path, request, started, console)
+    except Diverged as e:
+        if console.said:
+            raise Diverged("%s. MuJoCo said: %s" % (str(e).rstrip("."), " ".join(console.said[:3])))
+        raise
+    finally:
+        console.close()
 
+
+def run(mujoco, path, request, started, console):
+    """'process', with MuJoCo imported and what it says kept (see 'Console')."""
+    scene_file = request["scene_file"]
     model = mujoco.MjModel.from_xml_path(scene_file)
 
-    timestep = request.get("timestep")
-    if timestep:
-        model.opt.timestep = float(timestep)
+    # Before anything is stepped: a run asked for something absurd is refused,
+    # saying which parameter, rather than stepped for hours.
+    duration, timestep, planned, samples = run_parameters(request, model)
+    model.opt.timestep = timestep
     gravity = request.get("gravity")
     if gravity:
         # The exported model already carries the scene's gravity, or MuJoCo's
@@ -376,16 +670,32 @@ def process(path, request):
     next_sample = duration / (samples + 1) if samples > 0 else None
     steps = 0
     centres = centres_of_buoyancy(mujoco, model)
+    guard = Guard(request, planned, started)
+    # A model that is unstable from the start is one MuJoCo already warned
+    # about while working out where everything is.
+    diverged(mujoco, model, data, data.time)
     while data.time < duration:
         if centres:
             apply_buoyancy_moments(model, data, centres)
+        when = data.time
         mujoco.mj_step(model, data)
         steps += 1
+        diverged(mujoco, model, data, when)
+        guard.check(steps, data.time, duration)
         if next_sample is not None and data.time >= next_sample:
             trace.append(snapshot(mujoco, model, data, scratch))
             next_sample += duration / (samples + 1)
 
+    if not_finite(data):
+        # Past every check MuJoCo makes: nothing it warned about, and still not
+        # a number. Not reported as a reading either.
+        raise Diverged(
+            "MuJoCo's simulation ended at t = %g s with a state that is not a finite number. %s"
+            % (data.time, DIVERGED_REMEDY)
+        )
     after = snapshot(mujoco, model, data, scratch)
+    warnings.extend(degraded(mujoco, data))
+    warnings.extend("MuJoCo said: %s" % message for message in console.said)
     if pictures:
         looks["after"] = look(mujoco, model, data, warnings)
 
