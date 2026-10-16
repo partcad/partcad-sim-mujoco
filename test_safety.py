@@ -136,14 +136,18 @@ def test_a_run_that_will_not_finish_within_its_budget_stops_itself_saying_how_fa
     started = time.monotonic()
 
     # Ten thousand seconds of simulated time is five million steps -- tens of
-    # seconds on any machine -- and the budget is one and a half.
+    # seconds on any machine -- and the budget is three, of which the run keeps
+    # one back to say so.
     with pytest.raises(simulate_mujoco.OutOfTime) as raised:
-        simulate_mujoco.process(str(tmp_path), {"scene_file": scene, "duration": 10000.0, "timeout": 1.5})
+        simulate_mujoco.process(str(tmp_path), {"scene_file": scene, "duration": 10000.0, "timeout": 3.0})
 
-    assert time.monotonic() - started < 1.5  # before PartCAD would have stopped it
+    took = time.monotonic() - started
+    # Stopped on its own deadline, two seconds in, with a second to spare
+    # before PartCAD would have stopped it -- loading the model included.
+    assert 2.0 <= took < 3.0
     message = str(raised.value)
     assert "of the 10000 s asked for" in message
-    assert "budget is 1.5 s" in message
+    assert "budget is 3 s" in message
 
 
 def test_the_budget_leaves_a_margin_for_saying_so():

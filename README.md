@@ -512,7 +512,7 @@ swinging 5°, has the period 2π·√(I / (m·g·d)); a carriage on a slide fall
 `test_safety.py` proves each of the nets in "When a run goes wrong" with a
 run that needs it: a stiff pendulum that diverges on its first step (and, run
 without the check, a thousand steps that never get past 10 ms), a run of ten
-thousand simulated seconds under a budget of a second and a half, a run that
+thousand simulated seconds under a budget of three, a run that
 MuJoCo keeps taking back to nought seconds, and every absurd parameter. It needs
 MuJoCo for the runs.
 
