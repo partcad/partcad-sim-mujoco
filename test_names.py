@@ -114,11 +114,17 @@ def test_a_mechanism_reports_its_bodies_and_joints_under_partcads_names(tmp_path
     assert [body.get("name") for body in mujoco.iter("body")] == ["subject", "world-2"]
     assert [joint.get("name") for joint in mujoco.iter("joint")] == ["world-base"]
     sidecar = naming.read_sidecar(str(path))
-    assert sidecar["joints"] == {"world-base": {"path": ["world-base"], "joint": "world-base"}}
+    assert list(sidecar["joints"]) == ["world-base"]
+    entry = sidecar["joints"]["world-base"]
+    assert (entry["path"], entry["joint"]) == (["world-base"], "world-base")
+    # What the MJCF joint is, in PartCAD's terms: the joint map.
+    assert entry["map"]["joint"] == "world-base" and entry["map"]["kind"] == kinematics.REVOLUTE
+    assert [coordinate["parameter"] for coordinate in entry["map"]["coordinates"]] == ["turnZ"]
     # MJCF holds this joint's name as it is, so the sidecar maps it to itself.
-    # Under another reported name, a run that read the MJCF's names and not the
-    # sidecar's would be found out.
-    sidecar["joints"] = {"the hinge": {"path": ["world-base"], "joint": "world-base"}}
+    # Under another PartCAD name, a run that read the MJCF's names and not the
+    # sidecar's would be found out: a reading is keyed by the PartCAD joint the
+    # MJCF joint was written for.
+    entry["joint"] = "the hinge"
     with open(naming.sidecar_path(str(path)), "w", encoding="utf-8") as f:
         json.dump(sidecar, f)
 
@@ -140,4 +146,24 @@ def test_what_the_sidecar_does_not_mention_is_reported_as_it_is():
 
     names = simulate_mujoco.Names({"bodies": {"world": {"path": ["world-2"]}}, "joints": {"j": {"path": ["j-2"]}}})
     assert (names.body("world-2"), names.joint("j-2"), names.body("other")) == ("world", "j", "other")
+    # And a joint with no map is no PartCAD joint: it is read as MuJoCo has it.
+    assert names.map("j-2") is None
     assert simulate_mujoco.Names.beside("/nowhere/scene.xml").bodies == {}
+
+
+def test_a_joint_map_names_the_partcad_joint_a_reading_is_keyed_by():
+    import simulate_mujoco
+
+    entry = {"joint": "nut-bolt", "kind": "screw", "freedoms": 2, "coordinates": [], "followers": []}
+    names = simulate_mujoco.Names(
+        {
+            "bodies": {"nut": {"path": ["nut"]}},
+            "joints": {
+                "nut-bolt.turnZ": {"path": ["nut-bolt.turnZ"], "joint": "nut-bolt", "map": entry},
+                "nut-bolt.moveZ": {"path": ["nut-bolt.moveZ"], "joint": "nut-bolt", "map": entry},
+            },
+        }
+    )
+    assert names.map("nut-bolt.turnZ") == ("nut-bolt", entry)
+    assert names.map("nut-bolt.moveZ") == ("nut-bolt", entry)
+    assert names.internal_bodies == {"nut": "nut"}

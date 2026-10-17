@@ -40,7 +40,13 @@ welded to the world. This exporter writes what that rule returns:
   * every joint is written as MuJoCo's own joints, by what 'kinematics.classify'
     says it is (see 'write_joint'): a hinge or a slide per degree of freedom, a
     ``ball`` for three turns through a point, and an ``<equality>`` for what
-    one freedom's value follows.
+    one freedom's value follows -- and a floating joint's child, which nothing
+    holds, as a free body in the ``<worldbody>`` (see 'write_floating'),
+  * and, with ``names_file``, every joint's *map* goes into the sidecar beside
+    the model: which PartCAD joint and parameter each MJCF joint is, in what
+    units, from what start ('kinematics.joint_map()'), which is how a run
+    reports every joint under PartCAD's name and in PartCAD's terms however it
+    had to be written (see 'write_names').
 
 Two things this exporter decides that the file does not say, because a static
 arrangement does not say them and a *simulation* needs both:
@@ -283,17 +289,32 @@ SPRING_REFERENCE = "springReference"
 # PartCAD's joint physics, so nothing is written for it: it is a property of a
 # motor, and arrives with one (roadmap step 14).
 
-# The two ends of an MJCF ``range``, where PartCAD bounds a freedom on one side
-# only: a door that stops at 90 degrees one way and swings freely the other. MJCF
-# states a range as a pair, so the open side is written this far away -- a million
-# degrees, or a kilometre -- which no run reaches, and the joint stays the
-# 'revolute' PartCAD calls a turn bounded on either side.
-OPEN_BOUND = {kinematics.TURN: 1.0e6, kinematics.MOVE: 1.0e6}
+# The open end of an MJCF ``range``, where PartCAD bounds a freedom on one side
+# only: a door that stops at 90 degrees one way and swings freely the other.
+# MJCF states a range as a pair, and MuJoCo's XML reader takes ``inf`` and
+# ``-inf`` for either end of it ('ParseInfOrNan' in its 'xml_util.cc', there
+# since 3.2): its compiler asks only that the lower end be below the upper, and
+# the limit on the open side measures an infinite distance, so it never acts
+# (docs/design/simulation.md in PartCAD, section 8.13.6). It replaces the million
+# degrees -- or kilometre -- this exporter wrote there before, which was a number
+# nobody chose standing for "no bound". A freedom bounded on neither side is
+# ``limited="false"`` and has no range at all.
+OPEN = math.inf
 
 # Between a PartCAD joint's name and the freedom an MJCF joint is of, where one
 # PartCAD joint is written as several MJCF joints: 'nut-bolt.turnZ' and
 # 'nut-bolt.moveZ'. A dot, which every format PartCAD's simulations read allows.
+# These are the names *in the file*, for whoever opens it: a run reads every
+# MJCF joint of one PartCAD joint back as that joint, through the joint map in
+# the sidecar (see 'write_names'), and reports it under the PartCAD name alone.
 FREEDOM_SEPARATOR = "."
+
+# The '<keyframe><key>' a model starts from when one of its joints cannot be
+# written where the assembly shows it: a ball bounded by a cone that starts away
+# from its zero (see 'write_ball'). 'simulate_mujoco.START_KEY' is its twin and
+# resets a run to it ('mj_resetDataKeyframe'); the two scripts run in different
+# sandboxes and cannot import each other, and a test keeps them the same.
+START_KEY = "partcad:start"
 
 
 def _solref_for_restitution(restitution):
@@ -660,68 +681,97 @@ def si_scale(kind) -> float:
     return math.pi / 180.0 if kind == kinematics.TURN else 1.0 / urdf_common.MM_PER_M
 
 
-def freedom_label(freedom) -> str:
-    """What an MJCF joint of one freedom is called after its PartCAD joint's name: its parameter."""
-    if freedom.parameter:
-        return str(freedom.parameter)
-    return "%s%d" % (freedom.kind, freedom.index)
+def freedom_label(joint, freedom) -> str:
+    """What an MJCF joint of one freedom is called after its PartCAD joint's name: its parameter.
+
+    'kinematics.Joint.parameter_names()', which is what a reading of the joint
+    keys that freedom by too -- its parameter, or its kind and index where no
+    parameter declared it, told apart within the joint -- so that the file and
+    the run say the same of it.
+    """
+    return joint.parameter_names()[freedom.index]
+
+
+def joint_name(body) -> str:
+    """The name a run reports 'body''s joint under: PartCAD's, or its two bodies' where it has none."""
+    joint = body.joint
+    parent = body.joint_parent
+    return joint.name or "%s-%s" % (body.name, parent.name if isinstance(parent, kinematics.Body) else parent)
+
+
+def is_keyed(joint) -> bool:
+    """Whether 'joint' is a ball bounded by a cone that starts away from its zero (see 'write_ball')."""
+    if joint.kind != kinematics.BALL or joint.turn_limit is None:
+        return False
+    rotation = kinematics.rezeroed(joint).rotation
+    # How far the start is turned from the zero, as the sine of half of it:
+    # nought, to rounding, for a start of no turn at all (or of whole turns).
+    return math.sqrt(sum(float(v) * float(v) for v in rotation[1:])) > 1e-12
+
+
+def written_location(body):
+    """Where 'body' is written in its parent body: the configuration the assembly shows, but for a keyed ball.
+
+    Every joint is written at its starting values -- a hinge and a slide at
+    their 'ref', a ball re-zeroed at its start -- except a ball whose cone has
+    to stay about PartCAD's zero, which is written at the zero and started by
+    the model's keyframe (see 'write_ball').
+    """
+    joint = body.joint
+    if is_keyed(joint):
+        return joint.location([0.0] * len(joint.freedoms))
+    return joint.location()
 
 
 def write_joint(element, body, state):
     """Write the joint 'body' hangs off its parent by, as MuJoCo's own joints.
 
-    What 'kinematics.classify' says the joint is decides how:
+    What 'kinematics.classify' says the joint is decides how (section 8.13.4 of
+    PartCAD's simulation design record):
 
-      revolute, continuous,  one hinge or slide per degree of freedom, in order,
-      prismatic, cylindrical, in this one body: MuJoCo applies a body's joints
-      screw, universal,       in the order they are written, each about its
-      planar, chain           axis through its point in the frame the ones
-                              before it left, which is the decomposition
-                              'kinematics' gives every joint ('pos' and 'axis'
-                              are 'anchor_in_child' and 'axis_in_child')
+      revolute, prismatic,    one hinge or slide per degree of freedom, in the
+      cylindrical, screw,     order declared, in this one body: MuJoCo applies
+      universal, planar       a body's joints in the order they are written,
+      (either order),         each about its axis through its point in the
+      composite               frame the ones before it left, which is the
+                              decomposition 'kinematics' gives every joint
+                              ('pos' and 'axis' are 'anchor_in_child' and
+                              'axis_in_child'); a screw's thread is an
+                              '<equality joint>' between its two
       ball                    one 'ball', centred where the three turns meet
-                              ('origin_in_child')
-      floating                three slides and a ball: a '<freejoint>' is
-                              allowed only on a body directly in the
-                              '<worldbody>'
+                              ('origin_in_child'); see 'write_ball'
+
+    A floating joint is not written here: its child is a body of its own, held
+    by nothing, and written free in the '<worldbody>' (see 'write_floating').
 
     Each hinge and slide starts where the assembly shows it: the body is
     written at the starting values, and the joint's 'ref' is the starting
-    value, so MuJoCo's zero is PartCAD's zero and a reading of the joint is the
-    value PartCAD would give it. A ball has no 'ref' -- MuJoCo's ball starts at
-    the orientation the body is written in -- so its reading is the turn away
-    from the starting pose.
+    value, so MuJoCo's zero is PartCAD's zero and its reading of the joint is
+    the value PartCAD gives it. A ball has no 'ref', so it is re-zeroed
+    instead: written at its start, MuJoCo's identity *is* the start, and the
+    joint map says what to turn a reading by to make it PartCAD's.
 
-    A joint of one MJCF joint is named exactly what PartCAD named it, which is
-    what a validation reads (``after["joints"]["shoulder_pan"]``); one written
-    as several is '<name>.<parameter>' for each. What one freedom follows -- a
+    Every MJCF joint written goes into the sidecar with its joint map --
+    'kinematics.joint_map()', which PartCAD's joint and parameter it is, in what
+    units, from what start -- and a run reads them all back as the one PartCAD
+    joint they were written for ('kinematics.reading()'). In the file, a joint
+    of one MJCF joint is named exactly what PartCAD named it, and one written as
+    several is '<name>.<parameter>' for each. What one freedom follows -- a
     screw's move its turn -- is recorded for 'write_equalities'.
     """
     joint = body.joint
-    name = joint.name or "%s-%s" % (body.name, body.parent.name)
-    kind = joint.kind
+    name = joint_name(body)
     freedoms = joint.freedoms
     written = {}
 
-    if kind == kinematics.BALL:
-        centre = joint.origin_in_child()[1]
-        ball = _joint_element(element, state, name, "ball", centre, joint)
-        _write_joint_physics(ball, joint, kinematics.TURN, name, state, ball=True)
-        _report_ball_limits(freedoms, name, state)
+    if joint.kind == kinematics.BALL:
+        write_ball(element, body, name, state)
     else:
-        scalar = freedoms[:3] if kind == kinematics.FLOATING else freedoms
         single = len(freedoms) == 1
-        for freedom in scalar:
-            mjcf_name = name if single else name + FREEDOM_SEPARATOR + freedom_label(freedom)
-            written[freedom.index] = _write_freedom(element, joint, freedom, mjcf_name, state)
-        if kind == kinematics.FLOATING:
-            # The ball's centre is fixed in the body it turns, so it is read
-            # off the native joint's frame where that frame is -- with every
-            # move at zero; see 'kinematics.Joint.origin_in_child'.
-            centre = joint.origin_in_child({index: 0.0 for index in range(3)})[1]
-            ball = _joint_element(element, state, name + FREEDOM_SEPARATOR + "ball", "ball", centre, joint)
-            _write_joint_physics(ball, joint, kinematics.TURN, name, state, ball=True)
-            _report_ball_limits(freedoms[3:], name, state)
+        bounds = freedom_bounds(joint)
+        for freedom in freedoms:
+            mjcf_name = name if single else name + FREEDOM_SEPARATOR + freedom_label(joint, freedom)
+            written[freedom.index] = _write_freedom(element, joint, freedom, mjcf_name, name, bounds, state)
 
     for freedom in freedoms:
         if freedom.follows is not None and freedom.index in written and freedom.follows in written:
@@ -741,14 +791,50 @@ def write_joint(element, body, state):
         state["mimics"].append((name, joint.mimic, scalar_joints))
 
 
-def _joint_element(element, state, name, kind, anchor, of):
-    """One MJCF joint, under the name a run reports it by, 'name', made an MJCF name.
+def freedom_bounds(joint) -> dict:
+    """Each freedom's bounds as written, '{index: (lower, upper)}' in PartCAD's units, None where open.
 
-    'of' is the PartCAD joint it is (a freedom of), which the sidecar records
-    beside where it is (see 'write_names').
+    A freedom's own, but for a screw's move: a screw is bounded by its turn
+    (section 8.13.3 of PartCAD's simulation design record), so a bound stated
+    on the move is written as the turn's, through the lead -- the turn at which
+    the move reaches it -- and laid over whatever the turn states itself, the
+    narrower of the two winning; the move is then written with none
+    (section 8.13.6). MuJoCo would hold a bound on the slide as well, but only
+    through the equality that couples the two, which it holds softly.
+    """
+    bounds = {freedom.index: (freedom.lower, freedom.upper) for freedom in joint.freedoms}
+    if joint.kind != kinematics.SCREW:
+        return bounds
+    for freedom in joint.freedoms:
+        if freedom.follows is None or not freedom.limited or not freedom.ratio:
+            continue
+        leader = joint.freedoms[freedom.follows]
+        offset = freedom.offset or 0.0
+        # move = ratio * turn + offset, so the turn at a bound of the move is
+        # (bound - offset) / ratio -- and the move's lower bound is the turn's
+        # upper one where the thread runs the other way.
+        through = [None if bound is None else (bound - offset) / freedom.ratio for bound in bounds[freedom.index]]
+        if freedom.ratio < 0:
+            through.reverse()
+        lower, upper = bounds[leader.index]
+        if through[0] is not None:
+            lower = through[0] if lower is None else max(lower, through[0])
+        if through[1] is not None:
+            upper = through[1] if upper is None else min(upper, through[1])
+        bounds[leader.index] = (lower, upper)
+        bounds[freedom.index] = (None, None)
+    return bounds
+
+
+def _joint_element(element, state, name, kind, anchor, reported, entry):
+    """One MJCF joint, under the name 'name' made an MJCF name, recorded for the sidecar.
+
+    'reported' is the PartCAD joint it is (a freedom of), which a run reports
+    it under, and 'entry' its joint map ('kinematics.joint_map()'): both go
+    into the sidecar beside where the joint is (see 'write_names').
     """
     internal = state["joint_names"].claim(name, "joint", "joint")
-    state["reported_joints"][name] = {"path": [internal], "joint": of.name}
+    state["reported_joints"][name] = {"path": [internal], "joint": reported, "map": entry}
     joint = ElementTree.SubElement(element, "joint")
     joint.set("name", internal)
     joint.set("type", kind)
@@ -756,23 +842,29 @@ def _joint_element(element, state, name, kind, anchor, of):
     return joint
 
 
-def _write_freedom(element, joint, freedom, name, state):
-    """One hinge or slide, of one freedom of 'joint'. Returns the name it was written under."""
+def _write_freedom(element, joint, freedom, name, reported, bounds, state):
+    """One hinge or slide, of one freedom of 'joint'. Returns the name it was written under.
+
+    Its map is 'kinematics.joint_map(joint, [freedom], start=False)': the
+    joint is not re-zeroed, because its 'ref' already makes MuJoCo's value
+    PartCAD's, and a run has only to convert the units.
+    """
     mjcf = _joint_element(
         element,
         state,
         name,
         "hinge" if freedom.kind == kinematics.TURN else "slide",
         joint.anchor_in_child(freedom.index),
-        joint,
+        reported,
+        kinematics.joint_map(joint, [freedom.index], start=False),
     )
     mjcf.set("axis", mujoco_common.format_numbers(joint.axis_in_child(freedom.index)))
     if freedom.value:
         mjcf.set("ref", mujoco_common.format_numbers([joint_value(freedom.kind, freedom.value)]))
-    if freedom.limited:
-        open_bound = OPEN_BOUND[freedom.kind]
-        lower = freedom.lower if freedom.lower is not None else -open_bound
-        upper = freedom.upper if freedom.upper is not None else open_bound
+    lower, upper = bounds[freedom.index]
+    if lower is not None or upper is not None:
+        lower = -OPEN if lower is None else lower
+        upper = OPEN if upper is None else upper
         mjcf.set("limited", "true")
         mjcf.set(
             "range",
@@ -786,8 +878,119 @@ def _write_freedom(element, joint, freedom, name, state):
         # What moving the joint costs is a cost of moving its own freedoms; one
         # that follows another (a screw's move) is moved by it, and damping it
         # too would charge the same motion twice.
-        _write_joint_physics(mjcf, joint, freedom.kind, joint.name, state)
+        _write_joint_physics(mjcf, joint, freedom.kind, reported, state)
     return mjcf.get("name")
+
+
+def write_ball(element, body, name, state):
+    """One MJCF 'ball' for a ball joint, at the centre its three turns go through.
+
+    MJCF bounds a ball by one angle, how far it turns from its zero -- which is
+    how PartCAD bounds one too ('joint.turn_limit') -- and writes it as the
+    ball's ``range="0 a"``. MuJoCo's ball has no starting value: its identity is
+    "the initial configuration in which the model is defined", and a bound is
+    a cone about that same configuration. So:
+
+      * **A ball with no bound, or one that starts at its zero, is re-zeroed**
+        (section 8.13.5 of PartCAD's simulation design record): the body is
+        written at its start, MuJoCo's identity is the start, and the map's
+        'rotation' is the start R_s, which a reading puts back in front of
+        MuJoCo's rotation, J' = J . R_s. A ball at its zero is the same
+        either way, so its cone is about PartCAD's zero.
+      * **A bounded ball that starts anywhere else is not.** Re-zeroed, its cone
+        would be about its start; so the body is written at the ball's zero
+        orientation, where the cone belongs, and the start goes into the
+        model's keyframe instead (see 'write_keyframe'), which the simulation
+        resets to before it reads anything. Its map's start is the identity.
+        This is reported, because MuJoCo opens a file at its own initial
+        configuration and not at a keyframe: the ball is shown at its zero.
+
+    MuJoCo states a ball's rotation in the child body's frame, which the map
+    records ('kinematics.CHILD_FRAME') so that a reading is in the ball's own.
+    """
+    joint = body.joint
+    keyed = is_keyed(joint)
+    values = [0.0] * len(joint.freedoms) if keyed else None
+    centre = joint.origin_in_child(values)[1]
+    ball = _joint_element(
+        element,
+        state,
+        name,
+        "ball",
+        centre,
+        name,
+        kinematics.joint_map(joint, start=not keyed, frame=kinematics.CHILD_FRAME),
+    )
+    if joint.turn_limit is not None:
+        ball.set("limited", "true")
+        ball.set("range", mujoco_common.format_numbers([0.0, joint.turn_limit]))
+    else:
+        ball.set("limited", "false")
+    _write_joint_physics(ball, joint, kinematics.TURN, name, state, ball=True)
+    if not keyed:
+        return
+    # The start in MuJoCo's terms: its rotation of the child body as written,
+    # in the child body's frame, which is R_s seen from that frame.
+    start = kinematics.rezeroed(joint).rotation
+    tail = joint.classification.tail[0]
+    engine = urdf_common.quat_mul(urdf_common.quat_mul((tail[0], -tail[1], -tail[2], -tail[3]), start), tail)
+    state["keyed"][ball.get("name")] = urdf_common.normalize(engine)
+    turned = math.degrees(2.0 * math.acos(min(1.0, abs(float(start[0])))))
+    state["warnings"].append(
+        "The joint '%s' is a ball bounded at %g degrees that starts %.6g degrees from its zero: MJCF bounds a ball "
+        "about the orientation its body is written in, so the body is written at the ball's zero and its start is "
+        "the keyframe '%s', which a run starts from. MuJoCo opens the file at the ball's zero"
+        % (name, joint.turn_limit, turned, START_KEY)
+    )
+
+
+def write_floating(element, body, parent, state):
+    """A floating joint's child, which is written free: a ``<freejoint>``, under PartCAD's name for the joint.
+
+    A floating joint holds nothing. 'kinematics' makes its child a body of its
+    own, with no parent (section 8.13.2 of PartCAD's simulation design record),
+    which MJCF writes as a body directly in the '<worldbody>' with a
+    '<freejoint>' -- the only place MuJoCo allows one. Nested under what it was
+    connected to, as three slides and a ball, a loose part would have passed
+    through it: MuJoCo filters a child's contacts with its parent, and this
+    exporter excludes the two bodies of every joint. So nothing is excluded
+    here, and a block dropped on its base comes to rest on it.
+
+    It is written whatever 'static' says, as every joint an assembly declares
+    is: 'static' welds what *nothing* in the tree holds, and this body is loose
+    because the assembly says so. It is reported as the joint it was declared
+    as, read against the body it was connected to ('parent', the element of
+    'body.joint_parent', or None where that body was not written): its map is
+    'kinematics.joint_map(joint)', which a run reads from the two bodies' poses.
+    A joint's physics is between the two bodies it joins, and a free joint
+    moves against the world, so none of it is written.
+    """
+    joint = body.joint
+    name = joint_name(body)
+    internal = state["joint_names"].claim(name, "joint", "joint")
+    free = ElementTree.SubElement(element, "freejoint")
+    free.set("name", internal)
+    if parent is None:
+        state["warnings"].append(
+            "'%s' is floating against '%s', which holds no geometry and is not written: it is a free body, and "
+            "its joint '%s' is not reported" % (body.name, body.joint_parent.name, name)
+        )
+    else:
+        state["reported_joints"][name] = {"path": [internal], "joint": name, "map": kinematics.joint_map(joint)}
+    stated = sorted(set(joint.physics) & (set(JOINT_PHYSICS) | {SPRING_REFERENCE}))
+    if stated or joint.mimic:
+        state["warnings"].append(
+            "The joint '%s' is floating, which MJCF writes as a free body moving against the world rather than "
+            "against '%s': its %s %s not written"
+            % (
+                name,
+                body.joint_parent.name,
+                ", ".join(stated + (["mimic"] if joint.mimic else [])),
+                "is" if len(stated) + bool(joint.mimic) == 1 else "are",
+            )
+        )
+    for key in sorted(set(joint.physics) - set(JOINT_PHYSICS) - {SPRING_REFERENCE}):
+        state["unsupported"].add("joint %s" % key)
 
 
 def _write_joint_physics(mjcf, joint, kind, name, state, ball=False):
@@ -807,8 +1010,8 @@ def _write_joint_physics(mjcf, joint, kind, name, state, ball=False):
         # MuJoCo's ball springs back to the orientation the body is written
         # in, and has nowhere to say another.
         state["warnings"].append(
-            "The joint '%s' is written as a ball, which springs back to its starting pose: its %s is not written"
-            % (name, SPRING_REFERENCE)
+            "The joint '%s' is written as a ball, which springs back to the orientation it is written in: its %s "
+            "is not written" % (name, SPRING_REFERENCE)
         )
         return
     try:
@@ -819,13 +1022,47 @@ def _write_joint_physics(mjcf, joint, kind, name, state, ball=False):
         )
 
 
-def _report_ball_limits(freedoms, name, state):
-    """A ball's three turns may each be bounded; an MJCF ball can only bound the angle it turns through."""
-    if any(freedom.limited for freedom in freedoms):
-        state["warnings"].append(
-            "The joint '%s' is written as a ball, which MJCF can bound only by the whole angle it turns through: "
-            "the limits of its three turns are not written" % name
-        )
+def write_keyframe(mujoco, worldbody, state):
+    """Write the model's start as ``<keyframe><key name="partcad:start">``, where a joint needs one.
+
+    Only a bounded ball that starts away from its zero needs one (see
+    'write_ball'): everything else is written where it starts, at MuJoCo's own
+    initial configuration 'qpos0'. A key states the whole of 'qpos', so it is
+    'qpos0' for every joint but those balls -- MuJoCo's numbering of it, read off
+    the file as MuJoCo compiles it: bodies in the order they are written,
+    depth first, and each body's joints in the order they are written in it.
+    A free joint's coordinates are its body's 'pos' and 'quat', a hinge's and a
+    slide's its 'ref' -- in radians and metres, since a key is not converted by
+    '<compiler angle>' as a 'ref' is -- and a ball's the identity, or for a keyed
+    one its start. Nothing is written for a model that needs no key.
+    """
+    if not state["keyed"]:
+        return
+    qpos = []
+
+    def numbers(element, attribute, default):
+        text = element.get(attribute)
+        return [float(v) for v in text.split()] if text else list(default)
+
+    def walk(body):
+        for child in body:
+            if child.tag == "freejoint" or (child.tag == "joint" and child.get("type") == "free"):
+                qpos.extend(numbers(body, "pos", (0.0, 0.0, 0.0)))
+                qpos.extend(urdf_common.normalize(numbers(body, "quat", urdf_common.IDENTITY_Q)))
+            elif child.tag == "joint" and child.get("type") == "ball":
+                qpos.extend(state["keyed"].get(child.get("name"), urdf_common.IDENTITY_Q))
+            elif child.tag == "joint":
+                (ref,) = numbers(child, "ref", (0.0,))
+                qpos.append(math.radians(ref) if child.get("type", "hinge") == "hinge" else ref)
+        for child in body:
+            if child.tag == "body":
+                walk(child)
+
+    walk(worldbody)
+    keyframe = ElementTree.SubElement(mujoco, "keyframe")
+    key = ElementTree.SubElement(keyframe, "key")
+    key.set("name", START_KEY)
+    key.set("qpos", mujoco_common.format_numbers(qpos, 17))
 
 
 def write_equalities(mujoco, state):
@@ -927,9 +1164,12 @@ def emit_bodies(worldbody, found, state):
                 # Its parent held nothing and went back out; so does this.
                 continue
             # Where the joint puts it at its starting values: the
-            # configuration the assembly shows.
-            pose = body.joint.location()
+            # configuration the assembly shows (but see 'written_location').
+            pose = written_location(body)
         else:
+            # Nothing in the tree holds it -- a free root, an element welded to
+            # the world, or the child of a floating joint -- so it is placed in
+            # the world, where the assembly shows it.
             parent, pose = worldbody, body.world
         emitted = emit_body(parent, body, pose, state)
         if emitted is None:
@@ -939,6 +1179,11 @@ def emit_bodies(worldbody, found, state):
         if body.joint is not None and isinstance(body.parent, kinematics.Body):
             write_joint(element, body, state)
             state["excludes"].append((parent.get("name"), element.get("name")))
+        elif body.is_floating:
+            # Free whatever 'static' says, and against what it was connected
+            # to, which is written before it: 'bodies()' lists every body after
+            # the one its joint is to.
+            write_floating(element, body, elements.get(id(body.joint_parent)), state)
         elif body.parent is None and not state["options"]["static"]:
             # A body nothing holds: free to fall and to be pushed, which is
             # what makes a simulation of it worth running.
@@ -1100,6 +1345,9 @@ def process(path, request):
         "mimics": [],
         # (parent, child) MJCF body names of every joint; see 'write_excludes'.
         "excludes": [],
+        # MJCF ball name -> its start in MuJoCo's terms, for every bounded ball
+        # written at its zero rather than its start; see 'write_keyframe'.
+        "keyed": {},
         "options": {
             "tolerance": request.get("tolerance", 0.1),
             "angularTolerance": request.get("angularTolerance", 0.1),
@@ -1128,6 +1376,7 @@ def process(path, request):
     write_excludes(mujoco, state)
     write_equalities(mujoco, state)
     write_centres_of_buoyancy(mujoco, state)
+    write_keyframe(mujoco, worldbody, state)
 
     if not state["meshes"]:
         warnings.append("Nothing was exported: the object holds no geometry MJCF can reference")
@@ -1164,9 +1413,15 @@ def write_names(path, model_name, root, state):
     """Write the sidecar a simulation reads PartCAD's names back out of (see PartCAD's 'naming').
 
     Which MJCF name each PartCAD body and joint became, where each body's pose
-    is read (its '<body>', by name) and each reported joint (its '<joint>'), and
-    which PartCAD joint that is a freedom of. The model's name is the scene's,
-    which MJCF never needs to change but a reader should not have to know that.
+    is read (its '<body>', by name) and each reported joint (its '<joint>', or
+    a floating joint's '<freejoint>'), which PartCAD joint that is a freedom
+    of, and its joint map ('"map"', 'kinematics.joint_map()'): what the MJCF
+    joint is in PartCAD's terms, which a run turns MuJoCo's values back into
+    PartCAD's by ('kinematics.reading()'). One file from the exporter to the
+    simulation, as section 8.13.5 of PartCAD's simulation design record
+    decided, rather than a map written into the model in a spelling of its own.
+    The model's name is the scene's, which MJCF never needs to change but a
+    reader should not have to know that.
     """
     bodies = {name: {"path": [internal]} for name, internal in state["body_names"].mapping().get("body", {}).items()}
     names = naming.merged_mapping(state["body_names"], state["joint_names"])

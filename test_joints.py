@@ -7,9 +7,11 @@
 
 The models here are written by hand, so that what is under test is the reading
 and nothing PartCAD's exporter decides ('test_export_joints.py' is the
-exporter's): a pendulum on a hinge and the same pendulum on a ball joint, a
+exporter's, and how a model PartCAD wrote is read back through its sidecar's
+joint maps): a pendulum on a hinge and the same pendulum on a ball joint, a
 carriage falling along a slide and one an actuator holds up, a limited hinge,
-an unnamed one, and a free body.
+an unnamed one, and a free body. A model with no sidecar has no PartCAD joints
+in it, so each of these is reported under its own MJCF name, as MuJoCo has it.
 
 What is checked is physics with a known answer rather than whatever the
 plugin happened to print the day the test was written. A pendulum released
@@ -194,19 +196,20 @@ def test_the_effort_is_what_the_actuator_exerts_along_the_joint_in_newtons(swung
 
 
 def test_every_joint_is_named_typed_and_reported_but_a_free_one(swung):
-    """A hinge is 'revolute' when it is limited and 'continuous' when it is not,
-    the line PartCAD's 'motion:' draws. A free joint is the body's own pose,
-    which 'bodies' states already. An unnamed joint is named after its index."""
+    """A hinge is 'revolute' whether it is limited or not: a bound is a property
+    of the hinge, and PartCAD calls no turn 'continuous' any more. A free joint
+    is the body's own pose, which 'bodies' states already. An unnamed joint is
+    named after its index."""
     reported = swung["before"]["joints"]
     unnamed = mujoco.MjModel.from_xml_string(JOINTS).njnt - 2  # the wheel's: the last but the free one
 
     assert {name: joint["type"] for name, joint in reported.items()} == {
-        "swing": "continuous",
+        "swing": "revolute",
         "socket": "ball",
         "drop": "prismatic",
         "hold": "prismatic",
         "flap": "revolute",
-        "joint_%d" % unnamed: "continuous",
+        "joint_%d" % unnamed: "revolute",
     }
     assert "loose" in swung["before"]["bodies"]
 
@@ -232,7 +235,7 @@ def test_a_joint_the_model_starts_away_from_zero_reads_where_its_ref_puts_it(tmp
     flap = run(tmp_path, scene, duration=0.01)["before"]["joints"]["flap"]
 
     assert flap["pos"] == pytest.approx(60.0)
-    assert flap["type"] == "continuous"
+    assert flap["type"] == "revolute"
 
 
 def test_the_samples_carry_the_joints_too(swung):
