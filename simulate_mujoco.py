@@ -33,6 +33,14 @@ it. A plugin that needs to say more (a force, a temperature, a contact history)
 states it beside 'before' and 'after' in its own vocabulary; see
 'wrappers/wrapper_simulate.py' in PartCAD itself, which is what runs this.
 
+**Names are PartCAD's.** A validation reads ``after["bodies"]["cube"]`` and
+``after["joints"]["swing"]`` by the names PartCAD gave them, and the model may
+not hold every one of those as it is: MJCF has a body called 'world' of its own,
+so a scene's body of that name is written under another. The exporter says which
+in a sidecar beside the model (PartCAD's 'wrappers/naming.py'), and every body,
+joint and message here is reported under the PartCAD name it reads there; see
+'Names'. A model with no sidecar is reported under the names it has.
+
 A model with joints in it says one more thing, and the reading says it too:
 where each joint is and how fast it is moving, as ``joints`` beside ``bodies``,
 in the terms of the ``motion:`` an interface declares -- degrees for a turn,
@@ -246,13 +254,57 @@ class Guard:
             )
 
 
+class Names:
+    """PartCAD's name for what the model calls each body and each joint.
+
+    Read out of the sidecar the exporter wrote beside the model (see
+    'naming.read_sidecar' in PartCAD): its 'bodies' and 'joints' say where each
+    PartCAD body and reported joint is, and the last name of that path is what
+    MuJoCo calls it. A name the sidecar does not mention -- every name of a model
+    with no sidecar -- is reported as it is.
+    """
+
+    def __init__(self, sidecar=None):
+        sidecar = sidecar or {}
+        self.bodies = self._reverse(sidecar.get("bodies"))
+        self.joints = self._reverse(sidecar.get("joints"))
+
+    @staticmethod
+    def _reverse(entries):
+        out = {}
+        for name, entry in (entries or {}).items():
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if isinstance(path, list) and path:
+                out[str(path[-1])] = name
+        return out
+
+    @classmethod
+    def beside(cls, scene_file):
+        try:
+            import naming
+        except ImportError:
+            # A PartCAD from before names were transcoded, which wrote none.
+            return cls()
+        return cls(naming.read_sidecar(scene_file))
+
+    def body(self, internal):
+        return self.bodies.get(internal, internal)
+
+    def joint(self, internal):
+        return self.joints.get(internal, internal)
+
+
+# Every name as MuJoCo has it: a model with no sidecar.
+AS_WRITTEN = Names()
+
+
 def warning_index(mujoco, name):
     """MuJoCo's number for one of its warnings, or None for a MuJoCo that has no such warning."""
     value = getattr(mujoco.mjtWarning, name, None)
     return int(value) if value is not None else None
 
 
-def diverged(mujoco, model, data, when):
+def diverged(mujoco, model, data, when, names=AS_WRITTEN):
     """Raise 'Diverged' if MuJoCo has said that the state stopped being a number.
 
     'when' is the simulated time the step started at, which is the last instant
@@ -269,12 +321,12 @@ def diverged(mujoco, model, data, when):
         raise Diverged(
             "MuJoCo's simulation diverged at t = %g s: the %s of %s is not a finite number (%s). "
             "MuJoCo resets a model that does this and goes on, so nothing after this instant is a reading. %s"
-            % (when, quantity, located(mujoco, model, kind, where), name, DIVERGED_REMEDY)
+            % (when, quantity, located(mujoco, model, kind, where, names), name, DIVERGED_REMEDY)
         )
 
 
-def located(mujoco, model, kind, index):
-    """'joint <j> (body <b>)' for a degree of freedom or a position coordinate, by the names the model gives them."""
+def located(mujoco, model, kind, index, names=AS_WRITTEN):
+    """'joint <j> (body <b>)' for a degree of freedom or a position coordinate, by PartCAD's names for them."""
     joint = body = None
     if kind == "dof" and 0 <= index < model.nv:
         joint, body = int(model.dof_jntid[index]), int(model.dof_bodyid[index])
@@ -286,8 +338,8 @@ def located(mujoco, model, kind, index):
             body = int(model.jnt_bodyid[joint])
     if joint is None:
         return "coordinate %d" % index
-    joint_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint) or "joint_%d" % joint
-    body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body) or "body_%d" % body
+    joint_name = names.joint(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint) or "joint_%d" % joint)
+    body_name = names.body(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body) or "body_%d" % body)
     return "joint '%s' (body '%s')" % (joint_name, body_name)
 
 
@@ -359,13 +411,14 @@ def apply_buoyancy_moments(model, data, centres):
         data.xfrc_applied[body, 3:6] = numpy.cross(point - data.xipos[body], lift)
 
 
-def snapshot(mujoco, model, data, scratch):
-    """Where every body and every joint is right now, by the names the MJCF gave them.
+def snapshot(mujoco, model, data, scratch, names=AS_WRITTEN):
+    """Where every body and every joint is right now, by PartCAD's names for them.
 
     The world body is left out: it is body 0 of every model, it is the frame
     everything else is stated in, and it never moves. What is left is exactly
-    the bodies PartCAD's exporter wrote out of the scene, under the names it
-    gave them - which is what makes a validation expression readable.
+    the bodies PartCAD's exporter wrote out of the scene, under the names
+    PartCAD gave them ('names') - which is what makes a validation expression
+    readable. Every pose is in the world frame, MuJoCo's 'xpos' and 'xquat'.
 
     'scratch' is an 'MjData' of the same model that 'joints' may overwrite, or
     None for a model that has no joint to report.
@@ -375,15 +428,15 @@ def snapshot(mujoco, model, data, scratch):
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, index)
         if not name:
             name = "body_%d" % index
-        bodies[name] = {
+        bodies[names.body(name)] = {
             "pos": [float(v) * MM_PER_M for v in data.xpos[index]],
             "quat": [float(v) for v in data.xquat[index]],
         }
-    return {"time": float(data.time), "bodies": bodies, "joints": joints(mujoco, model, data, scratch)}
+    return {"time": float(data.time), "bodies": bodies, "joints": joints(mujoco, model, data, scratch, names)}
 
 
-def joints(mujoco, model, data, scratch):
-    """Where every joint is and how fast it moves, keyed by the name the MJCF gave it.
+def joints(mujoco, model, data, scratch, names=AS_WRITTEN):
+    """Where every joint is and how fast it moves, keyed by PartCAD's name for it ('names').
 
     Stated in PartCAD's vocabulary rather than MuJoCo's: the one the 'motion:'
     of an interface is written in, which is what a joint in a model PartCAD
@@ -458,6 +511,7 @@ def joints(mujoco, model, data, scratch):
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, index)
         if not name:
             name = "joint_%d" % index
+        name = names.joint(name)
         at = model.jnt_qposadr[index]
         dof = model.jnt_dofadr[index]
         if kind == mujoco.mjtJoint.mjJNT_HINGE:
@@ -657,7 +711,9 @@ def run(mujoco, path, request, started, console):
     # bodies, which is what a scene of parts is -- so that one costs exactly
     # what it did.
     scratch = mujoco.MjData(model) if reported_joints(mujoco, model) else None
-    before = snapshot(mujoco, model, data, scratch)
+    # What PartCAD calls everything the model holds, out of the sidecar beside it.
+    names = Names.beside(scene_file)
+    before = snapshot(mujoco, model, data, scratch, names)
     # What PartCAD would like a picture of, and what the scene looks like now,
     # for the first of them. Read now because by the end it has moved.
     pictures = request.get("snapshot")
@@ -673,17 +729,17 @@ def run(mujoco, path, request, started, console):
     guard = Guard(request, planned, started)
     # A model that is unstable from the start is one MuJoCo already warned
     # about while working out where everything is.
-    diverged(mujoco, model, data, data.time)
+    diverged(mujoco, model, data, data.time, names)
     while data.time < duration:
         if centres:
             apply_buoyancy_moments(model, data, centres)
         when = data.time
         mujoco.mj_step(model, data)
         steps += 1
-        diverged(mujoco, model, data, when)
+        diverged(mujoco, model, data, when, names)
         guard.check(steps, data.time, duration)
         if next_sample is not None and data.time >= next_sample:
-            trace.append(snapshot(mujoco, model, data, scratch))
+            trace.append(snapshot(mujoco, model, data, scratch, names))
             next_sample += duration / (samples + 1)
 
     if not_finite(data):
@@ -693,7 +749,7 @@ def run(mujoco, path, request, started, console):
             "MuJoCo's simulation ended at t = %g s with a state that is not a finite number. %s"
             % (data.time, DIVERGED_REMEDY)
         )
-    after = snapshot(mujoco, model, data, scratch)
+    after = snapshot(mujoco, model, data, scratch, names)
     warnings.extend(degraded(mujoco, data))
     warnings.extend("MuJoCo said: %s" % message for message in console.said)
     if pictures:

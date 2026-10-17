@@ -704,7 +704,8 @@ def test_this_package_declares_no_flatten():
         declared = yaml.safe_load(f)
     assert "flatten" not in declared["export"]["mjcf"]
     assert declared["export"]["mjcf"]["static"] is True
-    assert declared["simulation"]["mujoco"]["formatOptions"] == {"static": False}
+    assert declared["export"]["mjcf"]["names_file"] is False
+    assert declared["simulation"]["mujoco"]["formatOptions"] == {"static": False, "names_file": True}
 
 
 def test_the_friction_written_is_the_one_the_round_trip_reads_back(export_mjcf, tmp_path, no_occt):

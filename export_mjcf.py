@@ -95,7 +95,6 @@ false here and an ``ascii: true`` is reported rather than quietly written.
 
 import math
 import os
-import re
 import sys
 from xml.etree import ElementTree
 
@@ -114,6 +113,7 @@ sys.path.append(os.path.dirname(__file__))
 import kinematics  # noqa: E402
 import mass_properties  # noqa: E402
 import mujoco_common  # noqa: E402
+import naming  # noqa: E402
 import ocp_serialize  # noqa: E402
 import urdf_common  # noqa: E402
 
@@ -203,9 +203,18 @@ CENTRE_OF_BUOYANCY_PREFIX = "partcad:centre_of_buoyancy:"
 # than about the material it is made of.
 CONTACT_DEFAULTS = {"cone": "elliptic", "impratio": 10, "noslip_iterations": 3}
 
-# MJCF names end up as XML attributes and are referenced by name from geoms and
-# from the simulation's own output, so anything outside this set is replaced.
-_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
+# What an MJCF name may be, declared here because it is MJCF's (see PartCAD's
+# 'wrappers/naming.py'). MuJoCo's compiler requires names to be unique among
+# the elements of one type -- a body and a geom may share one, two bodies may not
+# -- compares them exactly, and accepts any characters at any length: '//p/x:y z'
+# compiles, and so does 'Cube' beside 'cube' (checked against MuJoCo 3.16; the
+# XML reference says the same of every 'name' attribute). One name is taken: the
+# '<worldbody>' is the body called 'world', so a body of that name is "repeated
+# name 'world' in body". Hence two rule sets, and one transcoder per element type
+# in 'process'. What is left to the transcoder is the XML itself: no control
+# characters, which an attribute does not keep.
+MJCF_NAMES = naming.Rules("MJCF")
+MJCF_BODY_NAMES = naming.Rules("MJCF", reserved=("world",))
 
 # PartCAD property -> the ``<geom>`` attribute that states it, and how to write
 # it. MJCF states friction as one attribute holding three coefficients, so the
@@ -283,7 +292,7 @@ OPEN_BOUND = {kinematics.TURN: 1.0e6, kinematics.MOVE: 1.0e6}
 
 # Between a PartCAD joint's name and the freedom an MJCF joint is of, where one
 # PartCAD joint is written as several MJCF joints: 'nut-bolt.turnZ' and
-# 'nut-bolt.moveZ'. A dot, because 'sanitize_name' keeps it.
+# 'nut-bolt.moveZ'. A dot, which every format PartCAD's simulations read allows.
 FREEDOM_SEPARATOR = "."
 
 
@@ -302,51 +311,18 @@ def _solref_for_restitution(restitution):
     return mujoco_common.format_numbers([0.02, max(0.01, 1.0 - restitution)], 6)
 
 
-def sanitize_name(name, fallback):
-    """An MJCF-safe name derived from a PartCAD name.
-
-    PartCAD names carry package paths and ':' separators ("//pub/examples:logo")
-    and the '/' that groups a link's own shapes, none of which belong in a name
-    that a geom, a sensor or a keyframe refers to.
+def model_name_of(name, fallback):
+    """The MJCF model's name for a PartCAD object's name.
 
     A parameterized object's name also carries its parameter values, after a
     ';'. Those are dropped rather than spelled out: `pc sim` runs a scene whose
     subject *is* a parameter, so keeping them would make the model's name a
     transcription of the whole declaration -- and a name is read, not parsed.
     Which instance it is is what the run is about and is reported beside the
-    file, not smuggled into it.
+    file, not smuggled into it. What is left is the scene's own name, 'world'
+    included: MJCF reserves that for a body, not for a model.
     """
-    name = str(name or "").partition(";")[0]
-    name = _UNSAFE_NAME.sub("_", name).strip("_")
-    return name or fallback
-
-
-class NameAllocator:
-    """Hands out unique names, since MJCF requires them within an element type.
-
-    Unique across the whole document rather than per type: that satisfies the
-    requirement everywhere at once, and it keeps the names readable in what a
-    simulation reports, which is where they are read from.
-    """
-
-    def __init__(self, separator="_", first=1):
-        self.used = set()
-        # How a repeat is told apart: "cube_1" for a geom or a mesh, as this
-        # exporter always named them, and "leg-2" for a body or a joint, which is
-        # how PartCAD makes a body's name and a joint's unique, so that a name
-        # only changes here when making it safe for MJCF made two of them one.
-        self.separator = separator
-        self.first = first
-
-    def take(self, name, fallback="body"):
-        base = sanitize_name(name, fallback)
-        candidate = base
-        suffix = self.first
-        while candidate in self.used:
-            candidate = "%s%s%d" % (base, self.separator, suffix)
-            suffix += 1
-        self.used.add(candidate)
-        return candidate
+    return naming.transcode(MJCF_NAMES, str(name or "").partition(";")[0], fallback)
 
 
 # Where PartCAD puts a node's own geometry, decoded, on the tree it hands over
@@ -475,7 +451,7 @@ def mesh_asset(shape, node, body_name, state):
     if asset_name is not None:
         return asset_name
 
-    asset_name = state["mesh_names"].take(node.get("label") or body_name, "mesh")
+    asset_name = state["mesh_names"].derive(node.get("label") or body_name, "mesh")
     write_mesh(shape, os.path.join(state["mesh_dir"], "%s.stl" % asset_name), state["options"])
     mesh = ElementTree.SubElement(state["asset"], "mesh")
     mesh.set("name", asset_name)
@@ -566,7 +542,7 @@ def emit_geom(body, part, pose, asset_name, physics, weighed, state, index):
     than left to MuJoCo's default of water's, which nobody chose.
     """
     geom = ElementTree.SubElement(body, "geom")
-    geom.set("name", state["geom_names"].take("%s_geom_%d" % (body.get("name"), index), "geom"))
+    geom.set("name", state["geom_names"].derive("%s_geom_%d" % (body.get("name"), index), "geom"))
     geom.set("type", "mesh")
     geom.set("mesh", asset_name)
     if not urdf_common.is_identity(pose):
@@ -612,7 +588,7 @@ def emit_body(parent, body, pose, state):
     here. Returns the element and what 'emit_geoms' writes into it, or None
     for a body with nothing in it and nothing under it, which goes back out.
     """
-    body_name = state["body_names"].take(body.name, "body")
+    body_name = state["body_names"].claim(body.name, "body", "body")
     element = ElementTree.SubElement(parent, "body")
     element.set("name", body_name)
     if not urdf_common.is_identity(pose):
@@ -635,7 +611,7 @@ def emit_body(parent, body, pose, state):
         # empty body, but it is noise in the model and in what a simulation
         # reports, so it goes back out.
         parent.remove(element)
-        state["body_names"].used.discard(body_name)
+        state["body_names"].release(body_name)
         if body.joint is not None:
             state["warnings"].append(
                 "'%s' holds no geometry, so its joint '%s' is not written" % (body.name, body.joint.name)
@@ -729,7 +705,7 @@ def write_joint(element, body, state):
 
     if kind == kinematics.BALL:
         centre = joint.origin_in_child()[1]
-        ball = _joint_element(element, state, name, "ball", centre)
+        ball = _joint_element(element, state, name, "ball", centre, joint)
         _write_joint_physics(ball, joint, kinematics.TURN, name, state, ball=True)
         _report_ball_limits(freedoms, name, state)
     else:
@@ -743,7 +719,7 @@ def write_joint(element, body, state):
             # off the native joint's frame where that frame is -- with every
             # move at zero; see 'kinematics.Joint.origin_in_child'.
             centre = joint.origin_in_child({index: 0.0 for index in range(3)})[1]
-            ball = _joint_element(element, state, name + FREEDOM_SEPARATOR + "ball", "ball", centre)
+            ball = _joint_element(element, state, name + FREEDOM_SEPARATOR + "ball", "ball", centre, joint)
             _write_joint_physics(ball, joint, kinematics.TURN, name, state, ball=True)
             _report_ball_limits(freedoms[3:], name, state)
 
@@ -765,9 +741,16 @@ def write_joint(element, body, state):
         state["mimics"].append((name, joint.mimic, scalar_joints))
 
 
-def _joint_element(element, state, name, kind, anchor):
+def _joint_element(element, state, name, kind, anchor, of):
+    """One MJCF joint, under the name a run reports it by, 'name', made an MJCF name.
+
+    'of' is the PartCAD joint it is (a freedom of), which the sidecar records
+    beside where it is (see 'write_names').
+    """
+    internal = state["joint_names"].claim(name, "joint", "joint")
+    state["reported_joints"][name] = {"path": [internal], "joint": of.name}
     joint = ElementTree.SubElement(element, "joint")
-    joint.set("name", state["joint_names"].take(name, "joint"))
+    joint.set("name", internal)
     joint.set("type", kind)
     joint.set("pos", mujoco_common.format_numbers([v / urdf_common.MM_PER_M for v in anchor]))
     return joint
@@ -781,6 +764,7 @@ def _write_freedom(element, joint, freedom, name, state):
         name,
         "hinge" if freedom.kind == kinematics.TURN else "slide",
         joint.anchor_in_child(freedom.index),
+        joint,
     )
     mjcf.set("axis", mujoco_common.format_numbers(joint.axis_in_child(freedom.index)))
     if freedom.value:
@@ -967,7 +951,7 @@ def emit_bodies(worldbody, found, state):
 def add_ground_plane(worldbody, state):
     """The floor the model stands on: a static plane, and MuJoCo's own default."""
     geom = ElementTree.SubElement(worldbody, "geom")
-    geom.set("name", state["geom_names"].take("ground_plane", "ground_plane"))
+    geom.set("name", state["geom_names"].derive("ground_plane", "ground_plane"))
     geom.set("type", "plane")
     geom.set("size", "0 0 0.05")
     geom.set("pos", "0 0 0")
@@ -1045,7 +1029,7 @@ def process(path, request):
 
     model_dir = os.path.dirname(os.path.abspath(path)) or "."
     stem = os.path.splitext(os.path.basename(path))[0] or "model"
-    model_name = sanitize_name(request.get("model_name") or root.get("label") or stem, stem)
+    model_name = model_name_of(request.get("model_name") or root.get("label") or stem, stem)
     mesh_dir_name = request.get("mesh_dir") or "%s_meshes" % stem
     mesh_dir = os.path.join(model_dir, mesh_dir_name)
     os.makedirs(mesh_dir, exist_ok=True)
@@ -1080,10 +1064,19 @@ def process(path, request):
 
     state = {
         "asset": asset,
-        "body_names": NameAllocator("-", 2),
-        "joint_names": NameAllocator("-", 2),
-        "geom_names": NameAllocator(),
-        "mesh_names": NameAllocator(),
+        # One namespace per element type, as MuJoCo has them. A body or a joint
+        # keeps PartCAD's name unless MJCF cannot have it, and is 'cube-2' after
+        # 'cube' where it cannot, as PartCAD itself tells two apart; a geom is
+        # 'cube_geom_1' and a mesh 'cube_1' after the first, as they always
+        # were. A mesh's name is also its file's, so it answers to the
+        # filesystem's rules rather than MJCF's.
+        "body_names": naming.Transcoder(MJCF_BODY_NAMES),
+        "joint_names": naming.Transcoder(MJCF_NAMES),
+        "geom_names": naming.Transcoder(MJCF_NAMES, "_", 1),
+        "mesh_names": naming.Transcoder(naming.FILE_NAMES, "_", 1),
+        # The reported name of every MJCF joint -> where it is and whose
+        # freedom it is, for the sidecar; see 'write_names'.
+        "reported_joints": {},
         "meshes": {},
         "mesh_dir": mesh_dir,
         "mesh_dir_name": mesh_dir_name,
@@ -1126,6 +1119,10 @@ def process(path, request):
     # scene) is said rather than written.
     found = kinematics.bodies(root, request.get("properties"))
     warnings.extend(found.problems)
+    # Every body PartCAD names is claimed before anything is written, so that
+    # which of two bodies keeps a name MJCF can hold once does not depend on
+    # the order they are nested in.
+    state["body_names"].claim_all((body.name for body in found), "body")
     emit_bodies(worldbody, found, state)
 
     write_excludes(mujoco, state)
@@ -1135,11 +1132,17 @@ def process(path, request):
     if not state["meshes"]:
         warnings.append("Nothing was exported: the object holds no geometry MJCF can reference")
 
+    renamed = naming.renamed_warning(MJCF_NAMES, state["body_names"], state["joint_names"])
+    if renamed:
+        warnings.append(renamed)
+
     ElementTree.indent(mujoco, space="  ")
     with open(path, "w", encoding="utf-8") as f:
         f.write('<?xml version="1.0" ?>\n')
         f.write(ElementTree.tostring(mujoco, encoding="unicode"))
         f.write("\n")
+    if request.get("names_file"):
+        write_names(path, model_name, root, state)
 
     return {
         "success": True,
@@ -1153,3 +1156,17 @@ def process(path, request):
         # the package does.
         "unsupported": sorted(state["unsupported"]),
     }
+
+
+def write_names(path, model_name, root, state):
+    """Write the sidecar a simulation reads PartCAD's names back out of (see PartCAD's 'naming').
+
+    Which MJCF name each PartCAD body and joint became, where each body's pose
+    is read (its '<body>', by name) and each reported joint (its '<joint>'), and
+    which PartCAD joint that is a freedom of. The model's name is the scene's,
+    which MJCF never needs to change but a reader should not have to know that.
+    """
+    bodies = {name: {"path": [internal]} for name, internal in state["body_names"].mapping().get("body", {}).items()}
+    names = naming.merged_mapping(state["body_names"], state["joint_names"])
+    names["scene"] = {str(root.get("label") or model_name): model_name}
+    return naming.write_sidecar(path, "mjcf", names, bodies, dict(state["reported_joints"]))

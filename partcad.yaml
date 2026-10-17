@@ -55,7 +55,12 @@ desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 # older PartCAD has no such module in its sandbox, and stamps no 'kind' on the
 # tree for the rule to read.
 #
-# partcad/partcad#784 shipped in 0.8.194.
+# partcad/partcad#784 shipped in 0.8.194. The model writer also writes every
+# name through PartCAD's 'naming' (partcad/partcad#799), which an older PartCAD
+# has no such module for in its sandbox, so the export would fail to import it.
+#
+# TODO: raise to ">=0.8.<the devel release after partcad/partcad#799 merges>"
+# once it is known; until then this still names 0.8.194.
 partcad: ">=0.8.194"
 
 docs:
@@ -77,8 +82,9 @@ docs:
     `pc sim` runs one under gravity and reports where everything ended up, so
     that a part or an assembly can state what it is supposed to do -- or not do
     -- and have that checked. `before` and `after` each carry `time` and a
-    `bodies` object: one entry per body, holding its position `pos` and its
-    orientation `quat` (`w x y z`). Positions are in **millimetres**, PartCAD's
+    `bodies` object: one entry per body, under PartCAD's name for it, holding
+    its position `pos` and its orientation `quat` (`w x y z`) in the world's
+    frame. Positions are in **millimetres**, PartCAD's
     unit everywhere, not the metres MuJoCo works in -- a validation expression
     is written by whoever wrote the part, against the numbers that part is
     drawn in.
@@ -286,6 +292,13 @@ export:
     # 'static' says.
     light: true
     ground_plane: true
+    # Write '<file>.names.json' beside the model: which MJCF name each PartCAD
+    # body and joint became, and where each one is (PartCAD's
+    # 'wrappers/naming.py'). MJCF can hold nearly every name PartCAD gives --
+    # not a body called 'world', which is MuJoCo's own -- and a run reports
+    # under PartCAD's names by reading this. Off for a file somebody exports to
+    # open; the simulation below turns it on.
+    names_file: false
     # 'model_name' defaults to the object's label, 'mesh_dir' to
     # '<file stem>_meshes' next to the model file, and 'timestep' to MuJoCo's.
     # 'density' (kg/m^3) is what PartCAD weighs a part at that states no
@@ -406,6 +419,9 @@ simulation:
     # is what knows it.
     formatOptions:
       static: false
+      # What lets the run report every body and joint under PartCAD's name
+      # rather than the one MJCF had to write it under; see `names_file` above.
+      names_file: true
     # How long, in seconds of simulated time. Ten is long enough for something
     # that is going to fall over to have fallen over and come to rest.
     duration: 10.0

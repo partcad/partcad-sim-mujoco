@@ -95,8 +95,8 @@ part, against the numbers that part is drawn in.
 ### Joints
 
 A model with joints in it — a hinge, a slide, a ball — also says where each of
-them is, as `joints` beside `bodies`, keyed by the name the MJCF gives the
-joint and stated the way an interface's `motion:` is: **degrees** for a turn,
+them is, as `joints` beside `bodies`, keyed by PartCAD's name for the
+joint (see **Names** under [Mechanisms](#mechanisms)) and stated the way an interface's `motion:` is: **degrees** for a turn,
 **millimetres** for a move.
 
 ```json
@@ -188,7 +188,16 @@ Each joint is written as MuJoCo's own, by what `kinematics` classifies it as:
   validation reads `after["joints"]["shoulder_pan"]`. One written as several
   names each after the parameter it is: `nut-bolt.turnZ`, `nut-bolt.moveZ`, and
   a floating joint's `….ball`. A body is named as PartCAD names it: after the
-  link that placed it, `leg`, `leg-2`.
+  link that placed it, `leg`, `leg-2`. Every name goes through MJCF's own
+  rules (`MJCF_NAMES` and `MJCF_BODY_NAMES` in `export_mjcf.py`, applied by
+  PartCAD's `wrappers/naming.py`): MuJoCo's compiler takes any characters at
+  any length and asks only that two elements of one type differ, so a name is
+  written as it is -- except a *body* called `world`, which is the
+  `<worldbody>` itself and is written `world-2`, and said to be. A model
+  called `world` is fine. With `names_file: true`, which the simulation asks
+  for, the export writes `<model>.names.json` beside the model, and the run
+  reports every body and joint under PartCAD's name again; a model with no
+  such file is reported under the names in it.
 * **Where it starts.** Every body is written where the assembly shows it — at
   the joints' starting values, `toParams` — and every hinge's and slide's `ref`
   is that value, so MuJoCo's zero is PartCAD's zero and a reading of the joint
@@ -494,6 +503,11 @@ against the sandbox contract that lives there — `ocp_serialize`, `urdf_common`
 way a sandbox does. CI installs it from PartCAD's `devel` branch, so that a
 change to that contract fails here before it is released.
 It needs no MuJoCo, because reading and writing a model do not involve one.
+
+`test_names.py` checks MJCF's naming rules and the sidecar the export writes,
+and runs a scene with a body called `world` and a pendulum whose arm is called
+that: every body and joint comes back under PartCAD's name. It needs `partcad`,
+and `mujoco` for the runs.
 
 `test_snapshot.py` needs numpy for the pictures, and MuJoCo for the half that
 runs the simulation end to end — a stack whose top block falls off, drawn
