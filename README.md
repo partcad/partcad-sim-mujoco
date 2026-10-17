@@ -113,7 +113,9 @@ read:
   "wrist":    {"type": "ball", "quat": [0.897, 0.078, -0.038, 0.433],
                "pos": {"turnX": 10.0, "turnY": 0.0, "turnZ": 51.58}, "vel": [0.0, 0.0, 486.901], "effort": [0.0, 0.0, 0.0]},
   "loose":    {"type": "floating", "quat": [1.0, 0.0, 0.0, 0.0],
-               "pos": {"turnY": 0.0, "turnX": 0.0, "turnZ": 0.0, "moveZ": -17.615, "moveY": 0.0, "moveX": 0.0}}
+               "pos": {"turnY": 0.0, "turnX": 0.0, "turnZ": 0.0, "moveZ": -17.615, "moveY": 0.0, "moveX": 0.0},
+               "vel": {"turnY": 0.0, "turnX": 0.0, "turnZ": 0.0, "moveZ": 490.5, "moveY": 0.0, "moveX": 0.0,
+                       "angular": [0.0, 0.0, 0.0]}}
 }
 ```
 
@@ -123,7 +125,7 @@ read:
 | `prismatic` | a slide | mm | mm/s | N |
 | `cylindrical`, `screw`, `universal`, `planar`, `composite` | a hinge or a slide per freedom | `{parameter: degrees or mm}` | the same, per second | `{parameter: N·m or N}` |
 | `ball` | a ball | `{turnX, turnY, turnZ}`, and `quat` (`w x y z`) | `[x, y, z]` deg/s | `[x, y, z]` N·m |
-| `floating` | a `<freejoint>` | all six, by parameter, and `quat` | — | — |
+| `floating` | a `<freejoint>` | all six, by parameter, and `quat` | all six, by parameter, and `angular`: `[x, y, z]` deg/s | — |
 
 * **`pos`** is the joint's value as PartCAD states it: nought at PartCAD's
   zero, and before anything has moved the `toParams` the assembly starts at
@@ -142,8 +144,14 @@ read:
   to the whole turns nearest it. Where the axes cannot decompose a rotation,
   only `quat` is given.
 * A ball's **`vel`** is its angular velocity about the axes of its own,
-  moving, frame. A floating joint has none: PartCAD reads a free body's pose,
-  not its speed.
+  moving, frame. A floating joint's is its six freedoms' rates by parameter
+  and, as `angular`, its angular velocity against the body it was connected
+  to, about the same moving frame a ball's is. Both bodies' velocities are
+  MuJoCo's own, of each body *frame* (`mj_objectVelocity` of `mjOBJ_XBODY`;
+  `mjOBJ_BODY` would be the centre of mass, which moves faster wherever the
+  body spins about a point off it), and PartCAD's `kinematics.reading()`
+  makes the rates out of them. A turn's rate is left out at gimbal lock, where
+  it is not determined, and a move's where the turns before it are not.
 * **`effort`** is what the model's actuators exert along each freedom —
   MuJoCo's `qfrc_actuator`, gear and force limits applied, keyed as `vel` is —
   which is the quantity an interface's `maxEffort` bounds. It is zero for a
@@ -589,7 +597,11 @@ away from its zero (a bounded ball through the keyframe), and moved away from
 it. Every kind is read back too: MuJoCo's values of its MJCF joints, moved
 anywhere and read through the joint maps in the sidecar, are PartCAD values at
 which `joint.location()` puts the body where MuJoCo did, to 1e-9 m — a
-re-zeroed ball and a floating joint included. It checks an open side is `inf`,
+re-zeroed ball and a floating joint included — and a block falling and
+spinning on a floating joint, against a base that falls and spins too, reads
+every rate as the central difference of its `pos` and `quat`, step by step. It
+also refuses a rig that starts a joint outside its own bounds, as PartCAD's
+`connect` check does. It checks an open side is `inf`,
 a ball's cone `range="0 a"` both ways (and the keyframe's `qpos` against
 MuJoCo's own `qpos0`), and the physics against closed forms: a 300 mm bar on a
 revolute joint released horizontal passes the bottom at √(2·m·g·d / I) and,

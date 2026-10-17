@@ -487,8 +487,10 @@ def joints(mujoco, model, data, scratch, names=AS_WRITTEN):
       quat      a ball's and a floating joint's rotation from PartCAD's zero,
                 'w x y z', in the joint's own frame
       vel       the same as 'pos', per second -- for a ball its angular
-                velocity '[x, y, z]' about its moving frame; none for a
-                floating joint, whose body moves as its body does
+                velocity '[x, y, z]' about its moving frame, and for a
+                floating joint its six rates by parameter beside 'angular',
+                its angular velocity against the body it was connected to,
+                '[x, y, z]' about its moving frame as a ball's is
       effort    what the model's actuators exert along each freedom, keyed as
                 'vel' is: N*m for a turn, N for a move, and for a ball
                 '[x, y, z]' N*m in the frame its 'vel' is in
@@ -496,8 +498,8 @@ def joints(mujoco, model, data, scratch, names=AS_WRITTEN):
     A hinge's and a slide's value is MuJoCo's own coordinate, since the
     exporter makes its 'ref' the starting value; a ball's is MuJoCo's
     rotation turned back by the start it was re-zeroed at; a floating joint's
-    is its body's pose against the body it was connected to. Its map says
-    which.
+    is its body's pose against the body it was connected to, and its rate the
+    two bodies' velocities (see '_twist'). Its map says which.
 
     **A model with no sidecar** -- one somebody wrote by hand -- has no PartCAD
     joints to report, so each of its own joints is reported under its MJCF
@@ -613,14 +615,35 @@ def _pose(state, body):
     return (tuple(float(v) for v in state.xquat[body]), tuple(float(v) for v in state.xpos[body]))
 
 
+def _twist(mujoco, model, state, body):
+    """A body's velocity in the world, as 'kinematics.reading()' takes one: ((vx, vy, vz), (wx, wy, wz)).
+
+    The linear velocity of the body *frame*'s origin in m/s, and the angular
+    velocity in rad/s, both about the world's axes. That is MuJoCo's
+    'mj_objectVelocity' of the body as 'mjOBJ_XBODY' -- its frame -- in the
+    world's orientation, reordered: MuJoCo states the angular velocity first.
+    Not 'mjOBJ_BODY', which is the body's centre of mass, moving faster than
+    its frame's origin by the spin about it wherever the two are apart -- and
+    'reading()' reads a free joint's pose, and so its rate, off the frame. The
+    world body never moves.
+    """
+    if body == 0:
+        return ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    import numpy
+
+    velocity = numpy.zeros(6)
+    mujoco.mj_objectVelocity(model, state, mujoco.mjtObj.mjOBJ_XBODY, int(body), velocity, 0)
+    return (tuple(float(v) for v in velocity[3:]), tuple(float(v) for v in velocity[:3]))
+
+
 def _partcad_reading(mujoco, model, state, members, names):
     """One PartCAD joint, read from the MJCF joints it was written as and their maps (see 'joints').
 
     'members' are (MJCF joint index, joint map) pairs. What each map is is
     'kinematics.joint_map()''s and what to make of the values 'reading()''s;
     only MuJoCo's side is here: which of 'qpos' and 'qvel' each MJCF joint is,
-    and for a floating joint the two bodies it is read from. None where a
-    floating joint's other body is not in the model.
+    and for a floating joint the two bodies whose poses and velocities it is
+    read from. None where a floating joint's other body is not in the model.
     """
     import kinematics
 
@@ -636,8 +659,9 @@ def _partcad_reading(mujoco, model, state, members, names):
             )
             if parent < 0:
                 return None
-            positions.append((_pose(state, model.jnt_bodyid[index]), _pose(state, parent)))
-            velocities.append(None)
+            child = model.jnt_bodyid[index]
+            positions.append((_pose(state, child), _pose(state, parent)))
+            velocities.append((_twist(mujoco, model, state, child), _twist(mujoco, model, state, parent)))
         elif kind == mujoco.mjtJoint.mjJNT_BALL:
             positions.append([float(v) for v in state.qpos[at : at + 4]])
             velocities.append([float(v) for v in state.qvel[dof : dof + 3]])

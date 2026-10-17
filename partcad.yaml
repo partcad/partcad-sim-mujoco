@@ -112,7 +112,7 @@ docs:
     | `prismatic` | a slide | mm | mm/s | N |
     | `cylindrical`, `screw`, `universal`, `planar`, `composite` | a hinge or a slide per freedom | `{parameter: degrees or mm}` | the same, per second | `{parameter: N·m or N}` |
     | `ball` | a ball | `{turnX, turnY, turnZ}`, and `quat` (`w x y z`) | `[x, y, z]` deg/s | `[x, y, z]` N·m |
-    | `floating` | a `<freejoint>` | all six, by parameter, and `quat` | -- | -- |
+    | `floating` | a `<freejoint>` | all six, by parameter, and `quat` | all six, by parameter, and `angular` (`[x, y, z]` deg/s) | -- |
 
     ```json
     {"swing":    {"type": "revolute", "pos": 54.614, "vel": 511.992, "effort": 0.0},
@@ -126,7 +126,9 @@ docs:
     carries each MJCF joint's map, and PartCAD's own `kinematics.reading()`
     turns MuJoCo's values back into PartCAD's. A ball's and a floating joint's
     `quat` is its rotation from PartCAD's zero, and a ball's `vel` its angular
-    velocity about its own moving frame. `effort` is what the model's actuators
+    velocity about its own moving frame; a floating joint's `vel` is its six
+    rates by parameter, with its angular velocity against the body it was
+    connected to as `angular`. `effort` is what the model's actuators
     exert along each freedom -- the quantity an interface's `maxEffort` bounds
     -- and is zero for a joint nothing drives. A free body that is no PartCAD
     joint, a scene's element, is not listed, because its coordinate is the

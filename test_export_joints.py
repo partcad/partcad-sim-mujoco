@@ -24,7 +24,8 @@ exporter:
   moved anywhere, read back through the joint map in the sidecar
   ('kinematics.reading()') as PartCAD's values, are where PartCAD's own
   'joint.location()' puts the body -- to 1e-9 m, for every kind, a re-zeroed
-  ball and a floating body included;
+  ball and a floating body included -- and a floating joint's rates are how
+  fast its readings change;
 * **physics with a closed form**: a bar on a revolute joint released horizontal
   passes the bottom at sqrt(2 m g d / I) and, swinging a little, has the period
   2 pi sqrt(I / (m g d)); a carriage on a slide falls as anything falls; a nut on
@@ -145,7 +146,13 @@ def rig(tmp_path, bore, assy=None, params=""):
     ctx = pc.Context(str(root))
     assembly = ctx.get_assembly(":rig")
     assert assembly is not None
-    return asyncio.run(assembly.get_wrapped(ctx))
+    tree = asyncio.run(assembly.get_wrapped(ctx))
+    # A rig that starts a joint against its own stop is a rig nothing here
+    # could be checked with: MuJoCo throws the joint back in on its first step.
+    # PartCAD's 'connect' check fails it, and the exporter would only warn.
+    outside = [problem for problem in kinematics.bodies(tree).problems if "outside its bounds" in problem]
+    assert not outside, outside
+    return tree
 
 
 def in_a_scene(tree, location=None, fixed=True):
@@ -875,6 +882,63 @@ def test_a_joint_of_several_freedoms_is_read_as_one_under_partcads_name(tmp_path
     assert result["before"]["joints"]["arm-base"]["effort"] == {"turnZ": 0.0, "moveZ": 0.0}
     # Two MJCF joints, one reading.
     assert mujoco.MjModel.from_xml_path(str(path)).njnt == 2
+
+
+def test_a_floating_joint_moves_at_the_rate_its_reading_changes_at(tmp_path, stand_in_geometry, export_mjcf):
+    """Falling and spinning against a base that falls and spins too, each of its six 'vel' is d'pos'/dt.
+
+    And its 'angular' is how fast its 'quat' turns, about its moving frame.
+    The base is free as well, so that what is checked is the block's motion
+    *against* it -- the two bodies' velocities, from 'mj_objectVelocity', put
+    together by PartCAD's 'reading()' -- and not the block's in the world. Read
+    every step of a run small enough for a central difference to be exact to
+    many digits, a tenth of a millisecond under RK4, and short enough that
+    nothing touches anything.
+    """
+    mujoco = pytest.importorskip("mujoco")
+    tree = in_a_scene(
+        rig(tmp_path, "motion: floating", params=", toParams: {moveZ: -100}"),
+        [[0.0, 0.0, 500.0], [0.0, 0.0, 1.0], 0.0],
+        fixed=False,
+    )
+    _result, path, _xml = export(export_mjcf, tmp_path, tree, static=False, names_file=True, ground_plane=False)
+    model = mujoco.MjModel.from_xml_path(str(path))
+    model.opt.integrator = mujoco.mjtIntegrator.mjINT_RK4
+    model.opt.timestep = step = 1e-4
+    data = started(mujoco, model)
+    # A free joint's velocity in MuJoCo is its frame's linear velocity in the
+    # world, m/s, then its angular velocity about its own axes, rad/s.
+    for body, twist in (("subject", [0.1, 0.2, 0.3, 1.0, -0.5, 0.7]), ("arm", [-0.2, 0.1, 0.4, 3.0, -2.0, 5.0])):
+        joint = model.body_jntadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body)]
+        assert model.jnt_type[joint] == mujoco.mjtJoint.mjJNT_FREE
+        data.qvel[model.jnt_dofadr[joint] : model.jnt_dofadr[joint] + 6] = twist
+    mujoco.mj_forward(model, data)
+
+    readings = []
+    for _ in range(200):
+        readings.append(read(mujoco, model, data, path)["arm-base"])
+        mujoco.mj_step(model, data)
+    assert data.ncon == 0
+
+    def spun(earlier, now, later):
+        """The angular velocity a quaternion's change says, deg/s about its own axes: 2 q^-1 dq/dt."""
+        q = now
+        # The same rotation is q and -q: each neighbour taken on q's side.
+        a, b = [(-1.0 if sum(x * y for x, y in zip(other, q)) < 0 else 1.0) for other in (earlier, later)]
+        rate = [(b * y - a * x) / (2.0 * step) for x, y in zip(earlier, later)]
+        product = urdf_common.quat_mul((q[0], -q[1], -q[2], -q[3]), tuple(rate))
+        return [2.0 * math.degrees(v) for v in product[1:]]
+
+    names = kinematics.bodies(tree).by_name("arm").joint.parameter_names()
+    for earlier, now, later in zip(readings, readings[1:], readings[2:]):
+        assert set(now["vel"]) == set(names) | {"angular"}
+        for name in names:
+            changed = (later["pos"][name] - earlier["pos"][name]) / (2.0 * step)
+            assert now["vel"][name] == pytest.approx(changed, rel=1e-5, abs=1e-6), name
+        assert now["vel"]["angular"] == pytest.approx(spun(earlier["quat"], now["quat"], later["quat"]), rel=1e-5)
+    # And it moved, every freedom of it: a check of rates of nought would pass.
+    final = readings[-1]["vel"]
+    assert all(abs(final[name]) > 1.0 for name in names), final
 
 
 #
