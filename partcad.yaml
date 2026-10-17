@@ -60,6 +60,18 @@ desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 # has no such module for in its sandbox, so the export would fail to import it.
 # #799 shipped in 0.8.204, and the run's wall-clock budget this simulation reads
 # as request["timeout"] (partcad/partcad#797) in 0.8.205.
+#
+# And it needs PartCAD's native joint types (partcad/partcad#804): 'classify()'
+# calling one turn 'revolute' whatever its bounds and a composite 'composite',
+# a floating joint's child freed as a body of its own ('Body.is_floating'), a
+# ball's one bound ('Joint.turn_limit'), and the re-zeroing, joint maps and
+# readings this exporter writes into the sidecar and the simulation reads back
+# ('rezeroed()', 'joint_map()', 'reading()'). An older PartCAD has none of the
+# three functions, so both scripts would fail on them.
+#
+# TODO(release): this must name the release that ships partcad/partcad#804,
+# which does not exist yet; until it does, the requirement below lets an older
+# PartCAD load this package and fail in the export instead of refusing it.
 partcad: ">=0.8.205"
 
 docs:
@@ -89,25 +101,40 @@ docs:
     drawn in.
 
     Beside `bodies`, each reading carries a `joints` object: one entry per
-    joint of the model, by the name the MJCF gives it, stated the way an
-    interface's `motion:` is -- degrees for a turn, millimetres for a move:
+    PartCAD joint, under PartCAD's name for it however many MJCF joints it was
+    written as, stated the way an interface's `motion:` is -- degrees for a
+    turn, millimetres for a move. `pos` and `vel` are a number for a joint of
+    one freedom and an object keyed by parameter for one of several:
 
     | `type` | in MJCF | `pos` | `vel` | `effort` |
     | --- | --- | --- | --- | --- |
-    | `revolute` | a hinge with a `range` | degrees | deg/s | N·m |
-    | `continuous` | a hinge without one | degrees | deg/s | N·m |
+    | `revolute` | a hinge | degrees | deg/s | N·m |
     | `prismatic` | a slide | mm | mm/s | N |
-    | `ball` | a ball | `quat` (`w x y z`) instead | `[x, y, z]` deg/s | `[x, y, z]` N·m |
+    | `cylindrical`, `screw`, `universal`, `planar`, `composite` | a hinge or a slide per freedom | `{parameter: degrees or mm}` | the same, per second | `{parameter: N·m or N}` |
+    | `ball` | a ball | `{turnX, turnY, turnZ}`, and `quat` (`w x y z`) | `[x, y, z]` deg/s | `[x, y, z]` N·m |
+    | `floating` | a `<freejoint>` | all six, by parameter, and `quat` | -- | -- |
 
-    `pos` is the joint's own coordinate, zero where the model placed the body
-    (or at the joint's `ref`). A ball joint's `vel` is about the axes of the
-    body's own frame. `effort` is what the model's actuators exert along the
-    joint -- the quantity an interface's `maxEffort` bounds -- and is zero for
-    a joint nothing drives. A free joint is not listed, because its
-    coordinate is the body's pose and `bodies` states that already; so a
-    scene of parts, every one of them a free body, reports `joints: {}`, and a
-    validation can walk `after["joints"]` without asking first whether there
-    is one.
+    ```json
+    {"swing":    {"type": "revolute", "pos": 54.614, "vel": 511.992, "effort": 0.0},
+     "nut-bolt": {"type": "screw", "pos": {"turnZ": 259.183, "moveZ": 7.207},
+                  "vel": {"turnZ": 2585.458, "moveZ": 71.818}, "effort": {"turnZ": 0.0, "moveZ": 0.0}}}
+    ```
+
+    `pos` is the joint's value as PartCAD states it -- nought at PartCAD's
+    zero, and the `toParams` the assembly starts at before anything has moved
+    -- whatever zero MuJoCo had to count from: the sidecar beside the model
+    carries each MJCF joint's map, and PartCAD's own `kinematics.reading()`
+    turns MuJoCo's values back into PartCAD's. A ball's and a floating joint's
+    `quat` is its rotation from PartCAD's zero, and a ball's `vel` its angular
+    velocity about its own moving frame. `effort` is what the model's actuators
+    exert along each freedom -- the quantity an interface's `maxEffort` bounds
+    -- and is zero for a joint nothing drives. A free body that is no PartCAD
+    joint, a scene's element, is not listed, because its coordinate is the
+    body's pose and `bodies` states that already; so a scene of parts reports
+    `joints: {}`, and a validation can walk `after["joints"]` without asking
+    first whether there is one. A model with no sidecar reports each of its own
+    joints under its MJCF name instead, a hinge as `revolute`, a slide as
+    `prismatic` and a ball as `ball`.
 
     ### Mechanisms: the joints PartCAD declares
 
@@ -120,22 +147,25 @@ docs:
 
     | The joint is | In MJCF |
     | --- | --- |
-    | one turn, limited / unlimited | a `hinge`, with / without a `range` |
-    | one move | a `slide` |
+    | one turn, bounded on either side, on both or on neither | a `hinge`, with a `range` where it is bounded |
+    | one move, likewise | a `slide` |
     | a turn and a move on one axis (cylindrical) | a `hinge` and a `slide` |
     | a screw | a `hinge`, a `slide`, and an `<equality joint>` for the thread |
-    | two turns through a point (universal) | two `hinge`s |
-    | three turns through a point | a `ball` |
-    | two moves and the turn about their normal (planar) | two `slide`s and a `hinge` |
-    | all six (floating) | three `slide`s and a `ball` |
-    | anything else | its freedoms in order, a `hinge` or a `slide` each |
+    | two turns whose lines cross (universal) | two `hinge`s |
+    | three turns through a point | a `ball`, with `range="0 a"` where it is bounded |
+    | two moves and the turn about their normal (planar), in either order | two `slide`s and a `hinge`, in the order declared |
+    | all six (floating) | a body of its own in the `<worldbody>`, with a `<freejoint>` |
+    | anything else (composite) | its freedoms in order, a `hinge` or a `slide` each |
 
-    A joint written as more than one MJCF joint names each after its
-    parameter: `nut.turnZ`, `nut.moveZ`. Every hinge and slide starts where
-    the assembly shows it, and its `ref` is the starting value, so a joint
-    reads what PartCAD would call its value: nought at PartCAD's zero. A
-    `mimic` is an `<equality joint>` too, and the two bodies of every joint
-    are kept from colliding with each other (`<contact><exclude>`).
+    Every hinge and slide starts where the assembly shows it, and its `ref` is
+    the starting value. A ball has no `ref`, so it is re-zeroed: written at its
+    start, with the start in its map -- but for a bounded ball that starts away
+    from its zero, whose cone has to stay about PartCAD's zero: that one is
+    written at its zero and started from the model's keyframe, which the
+    simulation resets to, and the export says so. A bound open on one side is
+    written `inf`. A `mimic` is an `<equality joint>` too, and the two bodies
+    of every joint but a floating one are kept from colliding with each other
+    (`<contact><exclude>`): a loose part rests on what it was connected to.
 
     Nothing has to be installed by hand: PartCAD installs this package's Python
     requirements into the sandbox it runs each implementation in, so a machine
@@ -254,7 +284,8 @@ export:
       decodes to, and writes the bodies PartCAD's body rule finds in it: every element of a scene a body of its own, everything in an
       assembly welded into one body or jointed to it, each joint as MuJoCo's
       own -- a hinge or a slide per degree of freedom, a ball, and an equality
-      for a screw's thread or a `mimic` -- named as PartCAD names it.
+      for a screw's thread or a `mimic` -- named as PartCAD names it, and a
+      floating joint's child as a free body of its own.
     path: export_mjcf.py
     extension: xml
     # For a PartCAD released before 'shape_tree' only: that is what has it
@@ -278,8 +309,10 @@ export:
     # is free, and MJCF says that with a '<freejoint>'; a file written to be
     # looked at keeps the scene where it was drawn instead. The joints inside an
     # assembly are written either way, so a pendulum opened in MuJoCo's viewer
-    # still swings on its hinge. The simulation below turns this off, because a
-    # simulation of a model that cannot move has nothing to report.
+    # still swings on its hinge, and a floating joint's body -- loose because
+    # the assembly says so -- is free either way. The simulation below turns
+    # this off, because a simulation of a model that cannot move has nothing to
+    # report.
     #
     # Which nodes are bodies at all is not an option: it is PartCAD's body
     # rule. 'flatten', which made every node holding geometry a free body of
@@ -293,10 +326,13 @@ export:
     ground_plane: true
     # Write '<file>.names.json' beside the model: which MJCF name each PartCAD
     # body and joint became, and where each one is (PartCAD's
-    # 'wrappers/naming.py'). MJCF can hold nearly every name PartCAD gives --
-    # not a body called 'world', which is MuJoCo's own -- and a run reports
-    # under PartCAD's names by reading this. Off for a file somebody exports to
-    # open; the simulation below turns it on.
+    # 'wrappers/naming.py'), and each MJCF joint's joint map -- which PartCAD
+    # joint and parameter it is, in what units, from what start
+    # ('kinematics.joint_map()'). MJCF can hold nearly every name PartCAD gives
+    # -- not a body called 'world', which is MuJoCo's own -- and a run reports
+    # every body and joint under PartCAD's names and in PartCAD's terms by
+    # reading this. Off for a file somebody exports to open; the simulation
+    # below turns it on.
     names_file: false
     # 'model_name' defaults to the object's label, 'mesh_dir' to
     # '<file stem>_meshes' next to the model file, and 'timestep' to MuJoCo's.
