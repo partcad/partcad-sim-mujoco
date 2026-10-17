@@ -1143,6 +1143,8 @@ def process(path, request):
         f.write("\n")
     if request.get("names_file"):
         write_names(path, model_name, root, state)
+    else:
+        naming.remove_sidecar(path)
 
     return {
         "success": True,
