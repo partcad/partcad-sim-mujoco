@@ -58,10 +58,9 @@ desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 # partcad/partcad#784 shipped in 0.8.194. The model writer also writes every
 # name through PartCAD's 'naming' (partcad/partcad#799), which an older PartCAD
 # has no such module for in its sandbox, so the export would fail to import it.
-#
-# TODO: raise to ">=0.8.<the devel release after partcad/partcad#799 merges>"
-# once it is known; until then this still names 0.8.194.
-partcad: ">=0.8.194"
+# #799 shipped in 0.8.204, and the run's wall-clock budget this simulation reads
+# as request["timeout"] (partcad/partcad#797) in 0.8.205.
+partcad: ">=0.8.205"
 
 docs:
   intro: |
