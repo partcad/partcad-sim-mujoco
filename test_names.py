@@ -15,6 +15,7 @@ sidecar beside the model, and the run reports under PartCAD's names.
 Needs PartCAD, and MuJoCo for the runs, as 'test_export_joints.py' does.
 """
 
+import json
 import os
 import sys
 
@@ -114,16 +115,22 @@ def test_a_mechanism_reports_its_bodies_and_joints_under_partcads_names(tmp_path
     assert [joint.get("name") for joint in mujoco.iter("joint")] == ["world-base"]
     sidecar = naming.read_sidecar(str(path))
     assert sidecar["joints"] == {"world-base": {"path": ["world-base"], "joint": "world-base"}}
+    # MJCF holds this joint's name as it is, so the sidecar maps it to itself.
+    # Under another reported name, a run that read the MJCF's names and not the
+    # sidecar's would be found out.
+    sidecar["joints"] = {"the hinge": {"path": ["world-base"], "joint": "world-base"}}
+    with open(naming.sidecar_path(str(path)), "w", encoding="utf-8") as f:
+        json.dump(sidecar, f)
 
     result = run(path, 0.2)
     for reading in (result["before"], result["after"]):
         assert sorted(reading["bodies"]) == ["subject", "world"]
-        assert sorted(reading["joints"]) == ["world-base"]
+        assert sorted(reading["joints"]) == ["the hinge"]
     # In the world's frame, where PartCAD's own joint puts the arm at the angle
     # MuJoCo reports (the body read a step behind the joint; see 'joints').
     found = kinematics.bodies(tree)
     arm = found.by_name("world")
-    angle = result["before"]["joints"]["world-base"]["pos"]
+    angle = result["before"]["joints"]["the hinge"]["pos"]
     expected = kinematics.compose(arm.parent.world, arm.joint.location([angle]))
     assert result["before"]["bodies"]["world"]["pos"] == pytest.approx(list(expected[1]), abs=1e-6)
 
