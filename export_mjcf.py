@@ -543,8 +543,15 @@ def _positive(value):
 
 
 def physics_of(node, state):
-    """What PartCAD says about the physics of the part behind one node of the tree."""
-    return (state["properties"].get(node.get("name")) or {}).get("physics") or {}
+    """What PartCAD says about the physics of the object behind one node of the tree.
+
+    Looked up by 'kinematics.properties_of', not by the node's full name: an
+    assembly or a scene whose full name a part shares -- the assembly 'nut'
+    that holds the part 'nut' -- has an entry of its own under its kind
+    ('kinematics.properties_key'), and looked up by name it got the part's
+    contact settings. A part is under its full name, as it always was.
+    """
+    return (kinematics.properties_of(state["properties"], node) or {}).get("physics") or {}
 
 
 def emit_geom(body, part, pose, asset_name, physics, weighed, state, index):
