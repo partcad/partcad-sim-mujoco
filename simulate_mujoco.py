@@ -44,7 +44,10 @@ joint and message here is reported under the PartCAD name it reads there; see
 A model with joints in it says one more thing, and the reading says it too:
 where each joint is and how fast it is moving, as ``joints`` beside ``bodies``,
 in the terms of the ``motion:`` an interface declares -- degrees for a turn,
-millimetres for a move. See 'joints' below.
+millimetres for a move. A joint is reported once, under PartCAD's name for it,
+however many MJCF joints it had to be written as and from whatever zero: the
+sidecar carries each one's joint map, and PartCAD's own 'kinematics.reading()'
+turns MuJoCo's values back into PartCAD's. See 'joints' below.
 
 **A run that cannot be trusted is not reported as one.** MuJoCo does not stop a
 simulation whose state stops being a number: it says so once, on its console,
@@ -86,6 +89,12 @@ DEG_PER_RAD = 180.0 / math.pi
 # metres, in the body's own frame. 'export_mjcf.CENTRE_OF_BUOYANCY_PREFIX' is
 # its twin; a test keeps the two the same.
 CENTRE_OF_BUOYANCY_PREFIX = "partcad:centre_of_buoyancy:"
+
+# The '<keyframe><key>' this package's exporter writes where a model cannot be
+# written at its start -- a bounded ball that starts away from its zero -- and
+# which a run therefore starts from. 'export_mjcf.START_KEY' is its twin; a
+# test keeps the two the same.
+START_KEY = "partcad:start"
 
 # What a run is when nothing says otherwise, in seconds of simulated time.
 DEFAULT_DURATION = 10.0
@@ -255,19 +264,34 @@ class Guard:
 
 
 class Names:
-    """PartCAD's name for what the model calls each body and each joint.
+    """PartCAD's name for what the model calls each body and each joint, and what each joint is.
 
     Read out of the sidecar the exporter wrote beside the model (see
     'naming.read_sidecar' in PartCAD): its 'bodies' and 'joints' say where each
     PartCAD body and reported joint is, and the last name of that path is what
     MuJoCo calls it. A name the sidecar does not mention -- every name of a model
     with no sidecar -- is reported as it is.
+
+    A joint entry also carries its joint map ('"map"', which PartCAD's
+    'kinematics.joint_map()' wrote): which PartCAD joint the MJCF joint is
+    written for, which of its parameters, in what units and from what start.
+    'mapped' is those, by MJCF name, and 'joints()' below reads them back.
     """
 
     def __init__(self, sidecar=None):
         sidecar = sidecar or {}
         self.bodies = self._reverse(sidecar.get("bodies"))
         self.joints = self._reverse(sidecar.get("joints"))
+        # PartCAD body -> what MuJoCo calls it: where a floating joint's
+        # reading finds the body it is read against.
+        self.internal_bodies = {partcad: internal for internal, partcad in self.bodies.items()}
+        # MJCF joint -> (the PartCAD joint it is written for, its map).
+        self.mapped = {}
+        for name, entry in (sidecar.get("joints") or {}).items():
+            path = entry.get("path") if isinstance(entry, dict) else None
+            mapping = entry.get("map") if isinstance(entry, dict) else None
+            if isinstance(path, list) and path and isinstance(mapping, dict):
+                self.mapped[str(path[-1])] = (str(entry.get("joint") or mapping.get("joint") or name), mapping)
 
     @staticmethod
     def _reverse(entries):
@@ -292,6 +316,10 @@ class Names:
 
     def joint(self, internal):
         return self.joints.get(internal, internal)
+
+    def map(self, internal):
+        """(PartCAD joint, joint map) of the MJCF joint 'internal', or None where the sidecar has no map of it."""
+        return self.mapped.get(internal)
 
 
 # Every name as MuJoCo has it: a model with no sidecar.
@@ -442,25 +470,55 @@ def joints(mujoco, model, data, scratch, names=AS_WRITTEN):
     of an interface is written in, which is what a joint in a model PartCAD
     exported came from, and what a validation of it is written against.
 
-      revolute,   'pos' in degrees, 'vel' in degrees per second, 'effort' in
-      continuous  N*m. Both are a MuJoCo hinge: 'revolute' when it is limited
-                  and 'continuous' when it is not, which is the line PartCAD
-                  (and URDF) draws between the two.
-      prismatic   'pos' in millimetres, 'vel' in millimetres per second,
-                  'effort' in N. A MuJoCo slide.
-      ball        'quat' (w x y z), the turn away from where the model placed
-                  the body; 'vel', the angular velocity [x, y, z] in degrees per
-                  second about the axes of the body's own frame (MuJoCo's own
-                  frame for it); 'effort', [x, y, z] in N*m in the same frame.
+    **A model PartCAD exported** is read through the joint maps in its sidecar
+    (see 'Names'), with PartCAD's own 'kinematics.reading()' -- so no copy of
+    how a joint was written lives here. Every MJCF joint written for one
+    PartCAD joint is read back as that one joint, under its name, however many
+    it took:
 
-    'pos' is the joint's own coordinate, so it is zero where the model placed
-    the body -- or the joint's 'ref', for a model that states one -- and not an
-    angle against anything else. A pendulum written out horizontal reads 0
-    there and a quarter turn, 90 one way or the other, hanging down. A model
-    PartCAD wrote states every hinge's and slide's starting value as its 'ref'
-    (see 'write_joint' in 'export_mjcf.py'), so there the reading *is* the
-    joint's value as PartCAD states it: nought at PartCAD's zero, and before
-    anything moves the 'toParams' the assembly starts at.
+      type      what 'kinematics' classifies the joint as: 'revolute',
+                'prismatic', 'cylindrical', 'screw', 'universal', 'ball',
+                'planar', 'floating' or 'composite'
+      pos       its value as PartCAD states it, in degrees for a turn and
+                millimetres for a move: a number for a joint of one freedom,
+                and an object keyed by parameter for one of several
+                ('{"turnZ": 30.0, "moveZ": 0.83}'); for a ball and a free body
+                the turns their rotation decomposes into, where it can
+      quat      a ball's and a floating joint's rotation from PartCAD's zero,
+                'w x y z', in the joint's own frame
+      vel       the same as 'pos', per second -- for a ball its angular
+                velocity '[x, y, z]' about its moving frame, and for a
+                floating joint its six rates by parameter beside 'angular',
+                its angular velocity against the body it was connected to,
+                '[x, y, z]' about its moving frame as a ball's is
+      effort    what the model's actuators exert along each freedom, keyed as
+                'vel' is: N*m for a turn, N for a move, and for a ball
+                '[x, y, z]' N*m in the frame its 'vel' is in
+
+    A hinge's and a slide's value is MuJoCo's own coordinate, since the
+    exporter makes its 'ref' the starting value; a ball's is MuJoCo's
+    rotation turned back by the start it was re-zeroed at; a floating joint's
+    is its body's pose against the body it was connected to, and its rate the
+    two bodies' velocities (see '_twist'). Its map says which.
+
+    **A model with no sidecar** -- one somebody wrote by hand -- has no PartCAD
+    joints to report, so each of its own joints is reported under its MJCF
+    name, as MuJoCo has it:
+
+      revolute    a hinge, limited or not: 'pos' in degrees, 'vel' in degrees
+                  per second, 'effort' in N*m
+      prismatic   a slide: 'pos' in millimetres, 'vel' in millimetres per
+                  second, 'effort' in N
+      ball        'quat' (w x y z), the turn away from where the model placed
+                  the body; 'vel', the angular velocity [x, y, z] in degrees
+                  per second about the axes of the body's own frame (MuJoCo's
+                  own frame for it); 'effort', [x, y, z] in N*m in the same
+                  frame
+
+    'pos' is the joint's own coordinate, zero where the model placed the body
+    -- or at the joint's 'ref', for a model that states one. A free joint is
+    left out: its coordinate is exactly the body's position and orientation,
+    which 'bodies' already states, in the same units.
 
     'effort' is what the model's actuators exert along the joint: MuJoCo's
     'qfrc_actuator', gear ratio and force limits applied, which is the quantity
@@ -472,16 +530,11 @@ def joints(mujoco, model, data, scratch, names=AS_WRITTEN):
     force on a degree of freedom mixes contacts, limits and equalities into one
     number that is none of them.
 
-    A free joint is left out. It is how a body that is free to move is written
-    -- which, in a scene PartCAD exported for a simulation, is every body
-    nothing holds -- and its coordinate is exactly the body's position and orientation, which
-    'bodies' already states, in the same units.
-
     A joint the MJCF did not name is reported as 'joint_<n>', 'n' being its
     index in the compiled model: the same rule 'bodies' follows, and the one
     name that does not depend on the order anything else was read in.
     """
-    reported = reported_joints(mujoco, model)
+    reported = reported_joints(mujoco, model, names)
     if not reported:
         return {}
 
@@ -494,7 +547,8 @@ def joints(mujoco, model, data, scratch, names=AS_WRITTEN):
     # stage under RK4. Reading 'qfrc_actuator' as it stands would state an
     # effort from up to a step ago beside a position from now. So the state
     # is copied and evaluated on its own, which touches neither the run nor
-    # what the bodies are read from.
+    # what the bodies are read from -- and a floating joint, which is read
+    # from two bodies' poses, is read from that state too, at 'time'.
     #
     # The bodies are not read from here, deliberately. They are read from the
     # run itself and so lag 'time' by up to a step, as they always have, and
@@ -503,44 +557,143 @@ def joints(mujoco, model, data, scratch, names=AS_WRITTEN):
     # the same instant.
     mujoco.mj_copyData(scratch, model, data)
     mujoco.mj_forward(model, scratch)
-    qpos, qvel, effort = scratch.qpos, scratch.qvel, scratch.qfrc_actuator
+
+    # Each name reported, in the order its first MJCF joint comes in the
+    # model, with the MJCF joints it is read from: the several a PartCAD joint
+    # was written as, or one of the model's own.
+    groups = {}
+    for index in reported:
+        internal = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, index) or "joint_%d" % index
+        mapped = names.map(internal)
+        if mapped is None:
+            groups[(names.joint(internal), None)] = [(index, None)]
+        else:
+            groups.setdefault((mapped[0], True), []).append((index, mapped[1]))
 
     reading = {}
-    for index in reported:
-        kind = model.jnt_type[index]
-        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, index)
-        if not name:
-            name = "joint_%d" % index
-        name = names.joint(name)
-        at = model.jnt_qposadr[index]
-        dof = model.jnt_dofadr[index]
-        if kind == mujoco.mjtJoint.mjJNT_HINGE:
-            reading[name] = {
-                "type": "revolute" if model.jnt_limited[index] else "continuous",
-                "pos": float(qpos[at]) * DEG_PER_RAD,
-                "vel": float(qvel[dof]) * DEG_PER_RAD,
-                "effort": float(effort[dof]),
-            }
-        elif kind == mujoco.mjtJoint.mjJNT_SLIDE:
-            reading[name] = {
-                "type": "prismatic",
-                "pos": float(qpos[at]) * MM_PER_M,
-                "vel": float(qvel[dof]) * MM_PER_M,
-                "effort": float(effort[dof]),
-            }
-        elif kind == mujoco.mjtJoint.mjJNT_BALL:
-            reading[name] = {
-                "type": "ball",
-                "quat": [float(v) for v in qpos[at : at + 4]],
-                "vel": [float(v) * DEG_PER_RAD for v in qvel[dof : dof + 3]],
-                "effort": [float(v) for v in effort[dof : dof + 3]],
-            }
+    for (name, partcad), members in groups.items():
+        if partcad:
+            value = _partcad_reading(mujoco, model, scratch, members, names)
+        else:
+            value = _model_reading(mujoco, model, scratch, members[0][0])
+        if value is not None:
+            reading[name] = value
     return reading
 
 
-def reported_joints(mujoco, model):
-    """The joints 'joints' reports, by index: every one but a free one."""
-    return [index for index in range(model.njnt) if model.jnt_type[index] != mujoco.mjtJoint.mjJNT_FREE]
+def _model_reading(mujoco, model, state, index):
+    """One joint of a model PartCAD did not write, as MuJoCo has it (see 'joints')."""
+    kind = model.jnt_type[index]
+    at, dof = model.jnt_qposadr[index], model.jnt_dofadr[index]
+    qpos, qvel, effort = state.qpos, state.qvel, state.qfrc_actuator
+    if kind == mujoco.mjtJoint.mjJNT_HINGE:
+        return {
+            "type": "revolute",
+            "pos": float(qpos[at]) * DEG_PER_RAD,
+            "vel": float(qvel[dof]) * DEG_PER_RAD,
+            "effort": float(effort[dof]),
+        }
+    if kind == mujoco.mjtJoint.mjJNT_SLIDE:
+        return {
+            "type": "prismatic",
+            "pos": float(qpos[at]) * MM_PER_M,
+            "vel": float(qvel[dof]) * MM_PER_M,
+            "effort": float(effort[dof]),
+        }
+    if kind == mujoco.mjtJoint.mjJNT_BALL:
+        return {
+            "type": "ball",
+            "quat": [float(v) for v in qpos[at : at + 4]],
+            "vel": [float(v) * DEG_PER_RAD for v in qvel[dof : dof + 3]],
+            "effort": [float(v) for v in effort[dof : dof + 3]],
+        }
+    return None
+
+
+def _pose(state, body):
+    """A body's pose in the world, as 'kinematics.reading()' takes one: ((w, x, y, z), (x, y, z)), metres."""
+    return (tuple(float(v) for v in state.xquat[body]), tuple(float(v) for v in state.xpos[body]))
+
+
+def _twist(mujoco, model, state, body):
+    """A body's velocity in the world, as 'kinematics.reading()' takes one: ((vx, vy, vz), (wx, wy, wz)).
+
+    The linear velocity of the body *frame*'s origin in m/s, and the angular
+    velocity in rad/s, both about the world's axes. That is MuJoCo's
+    'mj_objectVelocity' of the body as 'mjOBJ_XBODY' -- its frame -- in the
+    world's orientation, reordered: MuJoCo states the angular velocity first.
+    Not 'mjOBJ_BODY', which is the body's centre of mass, moving faster than
+    its frame's origin by the spin about it wherever the two are apart -- and
+    'reading()' reads a free joint's pose, and so its rate, off the frame. The
+    world body never moves.
+    """
+    if body == 0:
+        return ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    import numpy
+
+    velocity = numpy.zeros(6)
+    mujoco.mj_objectVelocity(model, state, mujoco.mjtObj.mjOBJ_XBODY, int(body), velocity, 0)
+    return (tuple(float(v) for v in velocity[3:]), tuple(float(v) for v in velocity[:3]))
+
+
+def _partcad_reading(mujoco, model, state, members, names):
+    """One PartCAD joint, read from the MJCF joints it was written as and their maps (see 'joints').
+
+    'members' are (MJCF joint index, joint map) pairs. What each map is is
+    'kinematics.joint_map()''s and what to make of the values 'reading()''s;
+    only MuJoCo's side is here: which of 'qpos' and 'qvel' each MJCF joint is,
+    and for a floating joint the two bodies whose poses and velocities it is
+    read from. None where a floating joint's other body is not in the model.
+    """
+    import kinematics
+
+    maps, positions, velocities, efforts = [], [], [], {}
+    ball = None
+    for index, entry in members:
+        kind = model.jnt_type[index]
+        at, dof = model.jnt_qposadr[index], model.jnt_dofadr[index]
+        maps.append(entry)
+        if kind == mujoco.mjtJoint.mjJNT_FREE:
+            parent = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_BODY, names.internal_bodies.get(entry.get("parent"), entry.get("parent"))
+            )
+            if parent < 0:
+                return None
+            child = model.jnt_bodyid[index]
+            positions.append((_pose(state, child), _pose(state, parent)))
+            velocities.append((_twist(mujoco, model, state, child), _twist(mujoco, model, state, parent)))
+        elif kind == mujoco.mjtJoint.mjJNT_BALL:
+            positions.append([float(v) for v in state.qpos[at : at + 4]])
+            velocities.append([float(v) for v in state.qvel[dof : dof + 3]])
+            # In the frame the reading states the ball's angular velocity in:
+            # its own, turned from the child body's that MuJoCo states it in.
+            frame = (tuple(entry.get("frame") or (1.0, 0.0, 0.0, 0.0)), (0.0, 0.0, 0.0))
+            ball = [float(v) for v in kinematics.rotate(frame, [float(v) for v in state.qfrc_actuator[dof : dof + 3]])]
+        else:
+            positions.append(float(state.qpos[at]))
+            velocities.append(float(state.qvel[dof]))
+            for coordinate in entry.get("coordinates") or []:
+                efforts[coordinate["parameter"]] = float(state.qfrc_actuator[dof])
+
+    result = kinematics.reading(maps, positions, velocities)
+    if ball is not None:
+        result["effort"] = ball
+    elif efforts:
+        one = maps[0].get("freedoms") == 1 and len(efforts) == 1
+        result["effort"] = next(iter(efforts.values())) if one else efforts
+    return result
+
+
+def reported_joints(mujoco, model, names=AS_WRITTEN):
+    """The joints 'joints' reports, by index: every one but a free one, and a free one a PartCAD joint is."""
+    found = []
+    for index in range(model.njnt):
+        if model.jnt_type[index] == mujoco.mjtJoint.mjJNT_FREE:
+            internal = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, index)
+            if not internal or names.map(internal) is None:
+                continue
+        found.append(index)
+    return found
 
 
 def geometry(mujoco, model, data):
@@ -701,18 +854,27 @@ def run(mujoco, path, request, started, console):
         model.opt.gravity[:] = [float(v) for v in gravity]
 
     data = mujoco.MjData(model)
+    # Where the model starts. That is MuJoCo's own initial configuration --
+    # every body where the file puts it -- unless the exporter wrote a start
+    # the file could not put a body at: a ball bounded by a cone about its
+    # zero that starts away from it, written at the zero and started here.
+    # See 'write_ball' and 'write_keyframe' in 'export_mjcf.py'.
+    start = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, START_KEY)
+    if start >= 0:
+        mujoco.mj_resetDataKeyframe(model, data, start)
     # Positions the bodies where the model says they are and computes
     # everything derived from that, without advancing time: this is the state
     # the scene described, which is what 'before' has to be.
     mujoco.mj_forward(model, data)
+    # What PartCAD calls everything the model holds, out of the sidecar beside
+    # it, and what each of its joints is.
+    names = Names.beside(scene_file)
     # Where the joints' efforts are worked out, so that working them out
     # touches neither the run nor what the bodies are read from; see 'joints'.
     # Not even made for a model with no joint to report -- a model of free
     # bodies, which is what a scene of parts is -- so that one costs exactly
     # what it did.
-    scratch = mujoco.MjData(model) if reported_joints(mujoco, model) else None
-    # What PartCAD calls everything the model holds, out of the sidecar beside it.
-    names = Names.beside(scene_file)
+    scratch = mujoco.MjData(model) if reported_joints(mujoco, model, names) else None
     before = snapshot(mujoco, model, data, scratch, names)
     # What PartCAD would like a picture of, and what the scene looks like now,
     # for the first of them. Read now because by the end it has moved.
