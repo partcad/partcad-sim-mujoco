@@ -69,10 +69,13 @@ desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 # ('rezeroed()', 'joint_map()', 'reading()'). An older PartCAD has none of the
 # three functions, so both scripts would fail on them.
 #
-# TODO(release): this must name the release that ships partcad/partcad#804,
-# which does not exist yet; until it does, the requirement below lets an older
-# PartCAD load this package and fail in the export instead of refusing it.
-partcad: ">=0.8.205"
+# And a body's own physics is read through 'kinematics.properties_of()'
+# (partcad/partcad#809), which keeps an assembly's entry apart from a part's
+# that shares its full name.
+#
+# #804 shipped in 0.8.211 and #809 in 0.8.215; 0.8.220 is the first release
+# published with both.
+partcad: ">=0.8.220"
 
 docs:
   intro: |
