@@ -253,7 +253,9 @@ beyond it, and a run in one says so in `warnings`.
 [Mechanisms](#mechanisms)), and a result says which, as `parts` beside the
 readings: each part by its path of labels, the part it is, the body it is in and
 where it sits in that body's frame. With the body's pose in a reading, that is
-where the part is, and what turns a body's loads into a part's:
+where the part is, and what turns a body's loads into a part's. It takes a
+PartCAD that can say which parts a body is (`kinematics.parts_entry()`); with
+an older one a run reports the same loads and no `parts`:
 
 ```json
 "parts": {

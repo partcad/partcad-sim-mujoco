@@ -225,6 +225,8 @@ def test_a_run_says_which_body_each_part_is_in(tmp_path):
     sys.path.append(os.path.join(os.path.dirname(pc.__file__), "wrappers"))
     import naming
 
+    if not hasattr(naming, "parts_of"):
+        pytest.skip("this PartCAD cannot say which parts a body is (partcad/partcad#823)")
     (tmp_path / "scene.xml").write_text(MODEL, encoding="utf-8")
     naming.write_sidecar(
         str(tmp_path / "scene.xml"),

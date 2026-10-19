@@ -704,8 +704,12 @@ def emit_body(parent, body, pose, state):
         return None
 
     # Which parts this body is, for the sidecar: what lets a run say which
-    # body a part is in and where, and so read a body's loads as a part's.
-    state["body_parts"][body.name] = kinematics.parts_entry(body)
+    # body a part is in and where, and so read a body's loads as a part's. A
+    # PartCAD from before 'parts_entry()' cannot say, and its runs report the
+    # loads without 'parts'.
+    parts_entry = getattr(kinematics, "parts_entry", None)
+    if parts_entry is not None:
+        state["body_parts"][body.name] = parts_entry(body)
     state["unsupported"].update(set(own) - MJCF_STATED)
     for _, part, _shape in shapes:
         state["unsupported"].update(set(part.physics) - MJCF_STATED)
