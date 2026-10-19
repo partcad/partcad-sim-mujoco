@@ -75,7 +75,13 @@ desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
 #
 # #804 shipped in 0.8.211 and #809 in 0.8.215; 0.8.220 is the first release
 # published with both.
-partcad: ">=0.8.220"
+#
+# And the sidecar says which parts each body is welded from
+# ('kinematics.parts_entry()', read back by 'naming.parts_of()'), which is what
+# a run reports as 'parts' beside the loads it reads (partcad/partcad, "loads
+# in simulation readings"). 0.8.223 is the release that change is expected to
+# ship in; correct this once it has.
+partcad: ">=0.8.223"
 
 docs:
   intro: |
@@ -479,6 +485,13 @@ simulation:
     # as 'samples'. Zero -- the default -- reports only 'before' and 'after',
     # which is what a validation reads.
     samples: 0
+    #
+    # Report what acts on every body in every reading -- its weight, its
+    # contacts, the force and moment each of its joints passes it -- with its
+    # mass and its acceleration, and which parts each body is welded from
+    # ('parts'). What a stress analysis of a part starts from; see "Loads" in
+    # README.md. False reports poses alone.
+    loads: true
     #
     # How long a run may take, in wall-clock seconds. Not stated here, so that
     # it is PartCAD's to work out: the larger of five minutes and ten seconds

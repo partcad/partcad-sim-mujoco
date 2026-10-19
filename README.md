@@ -190,6 +190,87 @@ record) rather than this package's, so that a validation of where a joint went
 reads the same against any engine whose plugin reads its joints back the same
 way. `effort` is MuJoCo's alone.
 
+### Loads
+
+Every body in a reading also says **what acts on it** — the loads a stress
+analysis of the body, or of a part in it, starts from — beside its pose:
+
+```json
+"upper": {
+  "pos": [0.0, -308.1, 485.4], "quat": [...],
+  "mass": 0.512, "com": [0.0, -297.2, 399.6],
+  "acc": [0.0, 0.0, 0.0], "angvel": [0.0, 0.0, 0.0], "angacc": [0.0, 0.0, 0.0],
+  "loads": [
+    {"kind": "joint", "from": "lower", "joint": "knee", "at": [0.0, -308.1, 485.4],
+     "force": [0.0, 0.0, 5.02], "torque": [-0.55, 0.0, 0.0]},
+    {"kind": "gravity", "from": "upper", "at": [0.0, -297.2, 399.6],
+     "force": [0.0, 0.0, -5.02], "torque": [0.0, 0.0, 0.0]}
+  ]
+}
+```
+
+| Key | What it is |
+| --- | --- |
+| `mass` | kg, as the model was written |
+| `com` | the centre of mass, mm, in the world's frame |
+| `acc` | its acceleration, m/s², in the world's frame — the acceleration itself, not an accelerometer's |
+| `angvel`, `angacc` | how fast the body turns and how fast that changes, deg/s and deg/s², about the world's axes |
+| `loads` | one entry per thing acting on the body |
+
+Each load says what it is (`kind`), what it comes from (`from`: the body at the
+other end, `world` for the world and the ground, the body itself for its weight
+and its lift), where it acts (`at`, mm, in the world's frame), and the `force`
+(N) on *this body* and the `torque` (N·m) about `at`, both in the world's frame:
+
+| `kind` | from | `at` |
+| --- | --- | --- |
+| `joint` | the body the joint joins this one to; `joint` names it | the joint's anchor |
+| `fixed` | the world, for a body a scene fixes (or a body a model welds to another) | the body's frame |
+| `contact` | each body touching it, every contact with it added up; `contacts` says how many | where they press, weighted by how hard |
+| `gravity` | itself | its centre of mass |
+| `buoyancy` | itself: the lift of the fluid it is in | its centre of buoyancy |
+
+A joint's load is everything it passes from one body to the other: what its
+constraint holds against, and what its spring, damper, friction and an actuator
+on it exert along the freedom it keeps — so a hinge held by a stiff spring
+reports the moment that holds the arm up, and one with nothing on it reports
+none about its axis. The body hanging from a joint reports its load from the
+body above, and the body above the same load reversed. A free body's six
+freedoms pass nothing and are not a load.
+
+**They add up.** The forces on a body are its mass times `acc`, and their
+moments about its centre of mass are what turns it; a validation, or a reader
+wondering whether a load is missing, can check that. MuJoCo works the joints'
+loads out from every body's acceleration and the forces on it
+(`mj_rnePostConstraint`). It applies the fluid's lift as forces on the joints
+rather than on the body, so that lift is taken back out of every joint it would
+have been counted in and reported as the body's own. The fluid's **drag**
+cannot be: MuJoCo applies it to the joints without saying how much fell on
+which body, so in a fluid each joint's load includes the drag on everything
+beyond it, and a run in one says so in `warnings`.
+
+**Which body a part is in.** A body is the parts welded together (see
+[Mechanisms](#mechanisms)), and a result says which, as `parts` beside the
+readings: each part by its path of labels, the part it is, the body it is in and
+where it sits in that body's frame. With the body's pose in a reading, that is
+where the part is, and what turns a body's loads into a part's:
+
+```json
+"parts": {
+  "subject/upper/main-channel-1": {"part": "//pub/robotics/parts/gobilda:structure/u_channel_7",
+                                   "body": "upper", "placement": [[0, 0, 0], [0, 0, 1], 0]}
+}
+```
+
+`params: {loads: false}` reports poses alone, as a run did before.
+
+```yaml
+# the joint carries the weight of the arm hanging from it, and the arm is at rest
+validation: |
+  abs(next(l for l in after["bodies"]["upper"]["loads"] if l["kind"] == "joint")["force"][2]
+      - after["bodies"]["upper"]["mass"] * 9.81) < 0.01
+```
+
 PartCAD reads nothing inside `before` and `after`. It hands them to the
 `validation:` expression the package wrote and reports what that says — every
 judgement in that sentence belongs to the package being simulated.
@@ -357,6 +438,7 @@ of one `simulate:` entry (per simulation).
 | `timestep` | MuJoCo's | Integration step, in seconds. |
 | `gravity` | the scene's | m/s², in the scene's frame. Overrides the scene's `gravity:` for this run; unset, the run is under the scene's, or MuJoCo's `[0, 0, -9.81]` when the scene states none. |
 | `samples` | `0` | Report the state at this many evenly spaced instants too, as `samples`. |
+| `loads` | `true` | Report what acts on every body, in every reading (see [Loads](#loads)); `false` reports poses alone. |
 | `timeout` | PartCAD's | Wall-clock seconds the run may take. PartCAD works it out and stops the run when it is spent; see below. |
 
 A run is refused before anything is stepped -- naming the parameter -- when it
@@ -616,6 +698,17 @@ without the check, a thousand steps that never get past 10 ms), a run of ten
 thousand simulated seconds under a budget of three, a run that
 MuJoCo keeps taking back to nought seconds, and every absurd parameter. It needs
 MuJoCo for the runs.
+
+`test_loads.py` runs a hand-written model — a box on the ground, an arm held
+level by the spring of its hinge from a frame welded to the world, a pendulum
+falling free, a float held under water by its hinge — and checks the `loads`
+against statics and Newton: the ground holds the box up with its weight, the
+hinge holds the arm with its weight and the moment of it (which is the spring's
+stiffness times its angle), the frame feels the hinge the other way and its
+weld holds both, the fluid's lift comes out of the hinge and acts at the centre
+of buoyancy, a pendulum released level starts in free fall with nothing in its
+hinge, and on every moving body the loads add up to its mass times its
+acceleration. It needs MuJoCo too.
 
 `test_joints.py` runs a hand-written model — a pendulum on a hinge and on a
 ball joint, a carriage on a slide, one an actuator holds up — and checks the
