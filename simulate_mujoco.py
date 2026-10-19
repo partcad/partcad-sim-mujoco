@@ -1176,6 +1176,10 @@ def run(mujoco, path, request, started, console):
     # yes, unless the 'simulate:' asked for nothing but poses.
     loads = request.get("loads", True) is not False
     centres = centres_of_buoyancy(mujoco, model)
+    if centres:
+        # Set before the first reading too, so that 'before' is read under the
+        # moment every later reading is; the loop sets it again every step.
+        apply_buoyancy_moments(model, data, centres)
     # Where the joints' efforts and the bodies' loads are worked out, so that
     # working them out touches neither the run nor what the bodies are read
     # from; see 'evaluate'. Not even made for a model with no joint to report

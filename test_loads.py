@@ -199,6 +199,29 @@ def test_a_float_on_a_hinge_is_held_by_the_lift_and_the_hinge_carries_the_rest(t
     assert total(after["bodies"]["float"]["loads"]) == pytest.approx([0.0, 0.0, 0.0], abs=1e-3)
 
 
+def test_before_is_read_under_the_moment_of_the_lift_too(tmp_path):
+    """A centre of buoyancy 10 mm beside the centre of mass: the lift turns the float from the very first reading."""
+    scene = """
+    <mujoco model="float">
+      <option gravity="0 0 -9.81" timestep="0.001"/>
+      <custom><numeric name="partcad:centre_of_buoyancy:float" data="0.51 0 0"/></custom>
+      <worldbody>
+        <body name="float" pos="0 0 1" gravcomp="0.5">
+          <joint name="pin" type="hinge" axis="0 1 0" stiffness="400" damping="20"/>
+          <geom type="sphere" size="0.01" pos="0.5 0 0" mass="1" contype="0" conaffinity="0"/>
+        </body>
+      </worldbody>
+    </mujoco>
+    """
+    before = run(tmp_path, scene, duration=0.01)["before"]
+    (lift,) = loads_of(before, "float", "buoyancy")
+    # About the centre of mass, the lift's moment is its lever times it: 10 mm
+    # along +x under 0.5 g along +z, about -y.
+    assert moment_about([lift], before["bodies"]["float"]["com"]) == pytest.approx(
+        [0.0, -0.01 * 0.5 * G, 0.0], abs=1e-6
+    )
+
+
 def test_a_run_that_asks_for_no_loads_reports_poses_alone(tmp_path):
     result = run(tmp_path, duration=0.05, loads=False)
     for reading in (result["before"], result["after"]):
@@ -220,9 +243,10 @@ def test_before_is_read_with_its_loads_too(tmp_path):
 
 
 def test_a_run_says_which_body_each_part_is_in(tmp_path):
-    import partcad as pc
-
-    sys.path.append(os.path.join(os.path.dirname(pc.__file__), "wrappers"))
+    pc = pytest.importorskip("partcad")
+    wrappers = os.path.join(os.path.dirname(pc.__file__), "wrappers")
+    if wrappers not in sys.path:
+        sys.path.append(wrappers)
     import naming
 
     if not hasattr(naming, "parts_of"):

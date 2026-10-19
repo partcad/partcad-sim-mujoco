@@ -1516,3 +1516,22 @@ def test_a_mesh_with_more_triangles_than_mujoco_reads_is_written_coarser(tmp_pat
     assert 0 < triangles <= 500
     # Binary STL: an 80-byte header, a count, and 50 bytes a triangle.
     assert os.path.getsize(path) == 84 + 50 * triangles
+
+
+def test_a_mesh_no_coarser_tolerance_can_thin_is_refused_at_once_saying_so(tmp_path, monkeypatch):
+    """Flat faces -- or a mesh imported as one -- are as many triangles at any tolerance: no retries, and why."""
+    pytest.importorskip("OCP")
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+
+    import export_mjcf
+
+    # A box is twelve triangles however coarse, against a limit of five.
+    monkeypatch.setattr(export_mjcf, "MAX_STL_FACES", 5)
+    meshed = []
+    count = export_mjcf.triangle_count
+    monkeypatch.setattr(export_mjcf, "triangle_count", lambda shape: meshed.append(1) or count(shape))
+    box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape()
+    options = {"tolerance": 0.1, "angularTolerance": 0.1, "ascii": False}
+    with pytest.raises(Exception, match="12 triangles.*no coarser tolerance makes fewer"):
+        export_mjcf.write_mesh(box, str(tmp_path / "box.stl"), options)
+    assert len(meshed) == 2

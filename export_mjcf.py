@@ -422,6 +422,7 @@ def write_mesh(shape, path, options):
     from OCP.StlAPI import StlAPI_Writer
 
     tolerance, angular = options["tolerance"], options["angularTolerance"]
+    previous = None
     for attempt in range(COARSER_ATTEMPTS + 1):
         BRepMesh_IncrementalMesh(
             shape,
@@ -433,6 +434,15 @@ def write_mesh(shape, path, options):
         triangles = triangle_count(shape)
         if triangles <= MAX_STL_FACES:
             break
+        if triangles == previous:
+            # Nothing to triangulate coarser: a mesh already (an imported STL
+            # keeps its triangles, whatever the tolerance), or that many flat
+            # faces, each a triangle or two at any tolerance.
+            raise Exception(
+                "%s has %d triangles, more than the %d MuJoCo reads from one mesh, and no coarser tolerance makes "
+                "fewer: it is a mesh already, or that many flat faces. Simplify it before it is simulated"
+                % (os.path.basename(path), triangles, MAX_STL_FACES)
+            )
         if attempt == COARSER_ATTEMPTS:
             raise Exception(
                 "%s has %d triangles at a tolerance of %g, more than the %d MuJoCo reads from one mesh: "
@@ -441,6 +451,7 @@ def write_mesh(shape, path, options):
         # A triangulation is kept on the shape and only ever refined, so the
         # coarser one is made from nothing.
         BRepTools.Clean_s(shape)
+        previous = triangles
         tolerance, angular = tolerance * 2.0, min(angular * 2.0, 1.0)
     writer = StlAPI_Writer()
     writer.ASCIIMode = options["ascii"]
