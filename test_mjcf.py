@@ -29,6 +29,7 @@ the same way.
 import asyncio
 import math
 import os
+import shutil
 import sys
 import xml.etree.ElementTree as ElementTree
 
@@ -554,6 +555,27 @@ def test_every_counter_the_reader_keeps_has_a_wording():
 #
 
 
+def mesh_written_as(content):
+    """A stand-in for 'export_mjcf.write_mesh': 'content' for a mesh, written at the tolerance asked for."""
+
+    def write_mesh(shape, path, options):
+        with open(path, "wb") as f:
+            f.write(content)
+        return options["tolerance"], 1
+
+    return write_mesh
+
+
+def mesh_copied_from(source):
+    """A stand-in for 'export_mjcf.write_mesh': the mesh is a copy of 'source', written at the tolerance asked for."""
+
+    def write_mesh(shape, path, options):
+        shutil.copyfile(source, path)
+        return options["tolerance"], 12
+
+    return write_mesh
+
+
 @pytest.fixture
 def export_mjcf(monkeypatch):
     """The MJCF exporter, with the two things that need OCCT stubbed out."""
@@ -561,7 +583,7 @@ def export_mjcf(monkeypatch):
     import ocp_serialize
 
     monkeypatch.setattr(ocp_serialize, "decode_shape", lambda obj: ("shape", obj.get("brep")))
-    monkeypatch.setattr(module, "write_mesh", lambda shape, path, options: open(path, "wb").write(b"solid x\n"))
+    monkeypatch.setattr(module, "write_mesh", mesh_written_as(b"solid x\n"))
     return module
 
 
@@ -1158,7 +1180,7 @@ def keeled(export_mjcf, monkeypatch, tmp_path, name, keel_offset, centres=True):
 
     import simulate_mujoco
 
-    monkeypatch.setattr(export_mjcf, "write_mesh", lambda shape, path, options: shutil.copyfile(STL_EXAMPLE, path))
+    monkeypatch.setattr(export_mjcf, "write_mesh", mesh_copied_from(STL_EXAMPLE))
 
     def cube(mass):
         # 'cube.stl' is a 10 mm cube with a corner at the origin, so its centre
@@ -1262,7 +1284,7 @@ def test_what_floats_rises_and_what_does_not_sinks(export_mjcf, monkeypatch, tmp
 
     import simulate_mujoco
 
-    monkeypatch.setattr(export_mjcf, "write_mesh", lambda shape, path, options: shutil.copyfile(STL_EXAMPLE, path))
+    monkeypatch.setattr(export_mjcf, "write_mesh", mesh_copied_from(STL_EXAMPLE))
     root = {
         "name": "//p:tank",
         "label": "tank",
@@ -1369,7 +1391,7 @@ def tilted_stack(export_mjcf, monkeypatch, tmp_path, name, mu, tilt=15.0, floor=
 
     import simulate_mujoco
 
-    monkeypatch.setattr(export_mjcf, "write_mesh", lambda shape, path, options: shutil.copyfile(STL_EXAMPLE, path))
+    monkeypatch.setattr(export_mjcf, "write_mesh", mesh_copied_from(STL_EXAMPLE))
     root = {
         "name": "//p:stack",
         "label": "stack",
@@ -1472,3 +1494,44 @@ def test_a_model_written_here_reads_back_as_the_same_arrangement(export_mjcf, tm
     assert placed["a"]["location"][0] == pytest.approx([100.0, 0.0, 250.0])
     assert placed["a"]["location"][2] == pytest.approx(90.0)
     assert placed["b"]["location"][0] == pytest.approx([0.0, 0.0, 0.0])
+
+
+def test_a_mesh_with_more_triangles_than_mujoco_reads_is_written_coarser(tmp_path, monkeypatch):
+    """MuJoCo refuses an STL of more than 200,000 triangles, and the model with it: written coarser, and said."""
+    pytest.importorskip("OCP")
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeSphere
+
+    import export_mjcf
+
+    # A sphere at a tolerance fine enough to need a few thousand triangles,
+    # against a limit of five hundred.
+    monkeypatch.setattr(export_mjcf, "MAX_STL_FACES", 500)
+    sphere = BRepPrimAPI_MakeSphere(10.0).Shape()
+    path = str(tmp_path / "sphere.stl")
+
+    options = {"tolerance": 0.001, "angularTolerance": 0.05, "ascii": False}
+    tolerance, triangles = export_mjcf.write_mesh(sphere, path, options)
+
+    assert tolerance > 0.001
+    assert 0 < triangles <= 500
+    # Binary STL: an 80-byte header, a count, and 50 bytes a triangle.
+    assert os.path.getsize(path) == 84 + 50 * triangles
+
+
+def test_a_mesh_no_coarser_tolerance_can_thin_is_refused_at_once_saying_so(tmp_path, monkeypatch):
+    """Flat faces -- or a mesh imported as one -- are as many triangles at any tolerance: no retries, and why."""
+    pytest.importorskip("OCP")
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+
+    import export_mjcf
+
+    # A box is twelve triangles however coarse, against a limit of five.
+    monkeypatch.setattr(export_mjcf, "MAX_STL_FACES", 5)
+    meshed = []
+    count = export_mjcf.triangle_count
+    monkeypatch.setattr(export_mjcf, "triangle_count", lambda shape: meshed.append(1) or count(shape))
+    box = BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape()
+    options = {"tolerance": 0.1, "angularTolerance": 0.1, "ascii": False}
+    with pytest.raises(Exception, match="12 triangles.*no coarser tolerance makes fewer"):
+        export_mjcf.write_mesh(box, str(tmp_path / "box.stl"), options)
+    assert len(meshed) == 2

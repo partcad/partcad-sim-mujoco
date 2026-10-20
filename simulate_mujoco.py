@@ -49,6 +49,15 @@ however many MJCF joints it had to be written as and from whatever zero: the
 sidecar carries each one's joint map, and PartCAD's own 'kinematics.reading()'
 turns MuJoCo's values back into PartCAD's. See 'joints' below.
 
+**What holds each body, and how hard.** Every body in a reading also says what
+acts on it: its weight, the fluid's lift on it, every contact, and the force and
+the moment each joint passes to it -- the joint to the body it hangs from and
+each joint of a body hanging from it, a weld to the world included -- as
+``loads`` beside its pose, with its mass, its centre of mass and how that is
+accelerating. They are the loads a stress analysis of the body, or of a part in
+it, starts from, and they add up: the forces on a body are its mass times its
+acceleration. See 'body_loads'.
+
 **A run that cannot be trusted is not reported as one.** MuJoCo does not stop a
 simulation whose state stops being a number: it says so once, on its console,
 and *resets the state* to where the model started -- so the run goes on, the
@@ -292,6 +301,16 @@ class Names:
             mapping = entry.get("map") if isinstance(entry, dict) else None
             if isinstance(path, list) and path and isinstance(mapping, dict):
                 self.mapped[str(path[-1])] = (str(entry.get("joint") or mapping.get("joint") or name), mapping)
+        # Part label -> the PartCAD body it is welded into, what it is and
+        # where it sits in that body ('naming.parts_of'): what a run reports as
+        # 'parts', so that a body's loads can be read as a part's.
+        try:
+            import naming
+
+            self.parts = naming.parts_of(sidecar)
+        except (ImportError, AttributeError):
+            # A PartCAD from before a sidecar said which parts a body is.
+            self.parts = {}
 
     @staticmethod
     def _reverse(entries):
@@ -439,7 +458,7 @@ def apply_buoyancy_moments(model, data, centres):
         data.xfrc_applied[body, 3:6] = numpy.cross(point - data.xipos[body], lift)
 
 
-def snapshot(mujoco, model, data, scratch, names=AS_WRITTEN):
+def snapshot(mujoco, model, data, scratch, names=AS_WRITTEN, loads=False, centres=()):
     """Where every body and every joint is right now, by PartCAD's names for them.
 
     The world body is left out: it is body 0 of every model, it is the frame
@@ -448,19 +467,57 @@ def snapshot(mujoco, model, data, scratch, names=AS_WRITTEN):
     PartCAD gave them ('names') - which is what makes a validation expression
     readable. Every pose is in the world frame, MuJoCo's 'xpos' and 'xquat'.
 
-    'scratch' is an 'MjData' of the same model that 'joints' may overwrite, or
-    None for a model that has no joint to report.
+    'scratch' is an 'MjData' of the same model that 'joints' and 'body_loads'
+    may overwrite, or None for a model that has no joint to report and a run
+    that asked for no loads. With 'loads', every body also says what acts on it
+    (see 'body_loads'), with 'centres' the centres of buoyancy
+    ('centres_of_buoyancy') its lift is stated at.
     """
     bodies = {}
     for index in range(1, model.nbody):
-        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, index)
-        if not name:
-            name = "body_%d" % index
-        bodies[names.body(name)] = {
+        bodies[body_name(mujoco, model, index, names)] = {
             "pos": [float(v) * MM_PER_M for v in data.xpos[index]],
             "quat": [float(v) for v in data.xquat[index]],
         }
-    return {"time": float(data.time), "bodies": bodies, "joints": joints(mujoco, model, data, scratch, names)}
+    reading = {"time": float(data.time), "bodies": bodies, "joints": {}}
+    if scratch is None:
+        return reading
+    evaluate(mujoco, model, data, scratch)
+    reading["joints"] = _joints(mujoco, model, scratch, names)
+    if loads:
+        for name, said in body_loads(mujoco, model, scratch, names, centres).items():
+            bodies[name].update(said)
+    return reading
+
+
+def body_name(mujoco, model, index, names=AS_WRITTEN):
+    """PartCAD's name for the body 'index', 'world' for the world, 'body_<n>' for one the MJCF did not name."""
+    if index == 0:
+        return WORLD
+    return names.body(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, index) or "body_%d" % index)
+
+
+def evaluate(mujoco, model, data, scratch):
+    """Copy the run's state into 'scratch' and work out everything derived from it, at its own time.
+
+    After 'mj_step', MuJoCo holds the state the step ended at -- 'qpos',
+    'qvel' and 'time' -- but everything it derives, the actuator and
+    constraint forces among them, from whatever it evaluated to take the step:
+    the state the step started from under the Euler integrators, and an
+    intermediate stage under RK4. Reading those as they stand would state a
+    force from up to a step ago beside a position from now. So the state is
+    copied and evaluated on its own, which touches neither the run nor what the
+    bodies are read from -- and a floating joint, which is read from two
+    bodies' poses, is read from that state too, at 'time'.
+
+    The bodies' poses are not read from here, deliberately. They are read from
+    the run itself and so lag 'time' by up to a step, as they always have, and
+    moving them onto it changes what every existing validation is handed: a
+    change of its own, which would put a reading's bodies and its joints on the
+    same instant.
+    """
+    mujoco.mj_copyData(scratch, model, data)
+    mujoco.mj_forward(model, scratch)
 
 
 def joints(mujoco, model, data, scratch, names=AS_WRITTEN):
@@ -534,29 +591,19 @@ def joints(mujoco, model, data, scratch, names=AS_WRITTEN):
     index in the compiled model: the same rule 'bodies' follows, and the one
     name that does not depend on the order anything else was read in.
     """
+    if not reported_joints(mujoco, model, names):
+        return {}
+    # The state at 'time', with everything derived from it worked out afresh
+    # (see 'evaluate'): 'qfrc_actuator' as it stands is from up to a step ago.
+    evaluate(mujoco, model, data, scratch)
+    return _joints(mujoco, model, scratch, names)
+
+
+def _joints(mujoco, model, scratch, names=AS_WRITTEN):
+    """'joints', read from 'scratch' once 'evaluate' has worked it out."""
     reported = reported_joints(mujoco, model, names)
     if not reported:
         return {}
-
-    # The state at 'time', with everything derived from it worked out afresh.
-    #
-    # After 'mj_step', MuJoCo holds the state the step ended at -- 'qpos',
-    # 'qvel' and 'time' -- but everything it derives, the actuator forces
-    # among them, from whatever it evaluated to take the step: the state the
-    # step started from under the Euler integrators, and an intermediate
-    # stage under RK4. Reading 'qfrc_actuator' as it stands would state an
-    # effort from up to a step ago beside a position from now. So the state
-    # is copied and evaluated on its own, which touches neither the run nor
-    # what the bodies are read from -- and a floating joint, which is read
-    # from two bodies' poses, is read from that state too, at 'time'.
-    #
-    # The bodies are not read from here, deliberately. They are read from the
-    # run itself and so lag 'time' by up to a step, as they always have, and
-    # moving them onto it changes what every existing validation is handed: a
-    # change of its own, which would put a reading's bodies and its joints on
-    # the same instant.
-    mujoco.mj_copyData(scratch, model, data)
-    mujoco.mj_forward(model, scratch)
 
     # Each name reported, in the order its first MJCF joint comes in the
     # model, with the MJCF joints it is read from: the several a PartCAD joint
@@ -694,6 +741,262 @@ def reported_joints(mujoco, model, names=AS_WRITTEN):
                 continue
         found.append(index)
     return found
+
+
+# What a load from the world -- a weld, the ground -- names as where it is from:
+# MuJoCo's body 0, which is no PartCAD body.
+WORLD = "world"
+
+
+def _wrench(force, point):
+    """A force acting at a point, as (force, moment about the world's origin): what 'body_loads' adds up."""
+    import numpy
+
+    force = numpy.asarray(force, dtype=float)
+    return force, numpy.cross(numpy.asarray(point, dtype=float), force)
+
+
+def _spatial(vector, point):
+    """MuJoCo's 6D 'torque:force' stated about 'point', as (force, moment about the world's origin)."""
+    import numpy
+
+    force = numpy.array(vector[3:6], dtype=float)
+    return force, numpy.array(vector[0:3], dtype=float) + numpy.cross(numpy.asarray(point, dtype=float), force)
+
+
+def _load(kind, source, point, wrench, **extra):
+    """One entry of a body's 'loads': the wrench stated about 'point', in PartCAD's units (see 'body_loads')."""
+    import numpy
+
+    force, moment = wrench
+    torque = moment - numpy.cross(numpy.asarray(point, dtype=float), force)
+    entry = {
+        "kind": kind,
+        "from": source,
+        "at": [float(v) * MM_PER_M for v in point],
+        "force": [float(v) for v in force],
+        "torque": [float(v) for v in torque],
+    }
+    entry.update(extra)
+    return entry
+
+
+def body_loads(mujoco, model, state, names=AS_WRITTEN, centres=()):
+    """What acts on every body at the state 'state', which 'evaluate' has worked out: PartCAD body -> what it says.
+
+    Each body says:
+
+      mass      kg, MuJoCo's: what the model was written with
+      com       its centre of mass, mm, in the world's frame
+      acc       how fast that is accelerating, m/s^2 -- the acceleration
+                itself, not MuJoCo's, which has gravity taken off it
+      angvel    how fast the body turns, deg/s, about the world's axes
+      angacc    how fast that changes, deg/s^2
+      loads     what acts on it, one entry each:
+
+        kind    'joint' (through one of its joints), 'fixed' (through a weld:
+                to the world, for a body a scene fixes), 'contact' (every
+                contact with one other body, added up), 'gravity' (its weight)
+                or 'buoyancy' (the lift of the fluid it is in)
+        from    the body at the other end -- 'world' for the world and the
+                ground -- or the body itself for its weight and its lift
+        joint   for a joint, PartCAD's name for it
+        at      where it acts, mm, in the world's frame: a joint's anchor, a
+                weld's body frame, the centre of the contacts, the centre of
+                mass, the centre of buoyancy
+        force   N, in the world's frame, acting *on this body*
+        torque  N*m, about 'at', in the world's frame
+        contacts  for a contact, how many there were
+
+    A joint's load is everything it passes from one body to the other: what its
+    constraint holds against, and what its spring, its damper, its friction and
+    an actuator on it exert along the freedom it keeps. So a body hanging from
+    another reports that joint's load from the body above, the body above reports
+    the same load reversed from the body below, and the loads on any body add up
+    to its mass times its acceleration -- the check a reader can make. A free
+    body's six freedoms pass nothing and are not a load.
+
+    What MuJoCo works the joints' forces out from is 'mj_rnePostConstraint':
+    every body's acceleration and the forces on it, carried down the tree.
+    Gravity and contacts it knows as forces on bodies; the fluid's lift on a
+    body (its 'gravcomp') it applies as a force on the joints instead, so that
+    lift is taken back out of every joint it would otherwise have been
+    reported through and stated as the body's own, at its centre of buoyancy.
+    The fluid's drag cannot be: MuJoCo works it out per body and applies it to
+    the joints without saying how much fell on which body, so in a fluid a
+    joint's load includes the drag on everything beyond it -- 'run' says so in
+    'warnings'.
+    """
+    import numpy
+
+    mujoco.mj_rnePostConstraint(model, state)
+    gravity = numpy.array(model.opt.gravity, dtype=float)
+    nbody = model.nbody
+
+    def point_of(index):
+        return state.subtree_com[model.body_rootid[index]]
+
+    # Which bodies have a joint of their own, which joint states a joint load,
+    # and where it is anchored: the first of a body's joints, which is where
+    # PartCAD's joint is written -- a composite's freedoms follow one another
+    # in one body and are one PartCAD joint.
+    free, anchors, joint_of = set(), {}, {}
+    for index in range(model.njnt):
+        body = int(model.jnt_bodyid[index])
+        if model.jnt_type[index] == mujoco.mjtJoint.mjJNT_FREE:
+            free.add(body)
+            continue
+        if body in anchors:
+            continue
+        anchors[body] = numpy.array(state.xanchor[index], dtype=float)
+        internal = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, index) or "joint_%d" % index
+        mapped = names.map(internal)
+        joint_of[body] = mapped[0] if mapped is not None else names.joint(internal)
+
+    # The fluid's lift on each body, as a force at its centre of mass: the way
+    # MuJoCo applies it ('gravcomp'), and what has to come back out of the
+    # joints. Stated, below, at the centre of buoyancy; the moment between the
+    # two is what 'apply_buoyancy_moments' applies as 'xfrc_applied', which
+    # MuJoCo does count as a force on the body.
+    lift = {}
+    for index in range(1, nbody):
+        compensated = float(model.body_gravcomp[index])
+        if compensated:
+            lift[index] = _wrench(-compensated * model.body_mass[index] * gravity, state.xipos[index])
+    centre_of = {body: local for body, local in centres}
+
+    # Every contact, added up per pair of bodies, as a force on each. MuJoCo
+    # states a contact's force on geom2, from geom1, in the contact's frame;
+    # it is the geom's own body it acts on, whatever MuJoCo welds that to.
+    touching = {}
+    for index in range(state.ncon):
+        contact = state.contact[index]
+        found = numpy.zeros(6)
+        mujoco.mj_contactForce(model, state, index, found)
+        frame = numpy.array(contact.frame, dtype=float).reshape(3, 3)
+        force, torque = frame.T @ found[:3], frame.T @ found[3:]
+        point = numpy.array(contact.pos, dtype=float)
+        first, second = int(model.geom_bodyid[contact.geom[0]]), int(model.geom_bodyid[contact.geom[1]])
+        for body, other, sign in ((second, first, 1.0), (first, second, -1.0)):
+            if body == 0:
+                continue
+            entry = touching.setdefault((body, other), [numpy.zeros(3), numpy.zeros(3), numpy.zeros(3), 0.0, 0])
+            entry[0] += sign * force
+            entry[1] += sign * (torque + numpy.cross(point, force))
+            # Where they are, weighted by how hard each presses: the point the
+            # added-up force is stated about.
+            weight = abs(float(found[0]))
+            entry[2] += weight * point
+            entry[3] += weight
+            entry[4] += 1
+    contacts_on = {}
+    for (body, _other), (force, moment, _points, _weight, _count) in touching.items():
+        total = contacts_on.setdefault(body, [numpy.zeros(3), numpy.zeros(3)])
+        total[0] += force
+        total[1] += moment
+
+    # The lift on everything from each body outwards, which MuJoCo passed
+    # through that body's joint: children come after their parent in MuJoCo's
+    # numbering, so one pass from the last body back adds each up.
+    beyond = {index: (numpy.zeros(3), numpy.zeros(3)) for index in range(nbody)}
+    for index in range(nbody - 1, 0, -1):
+        force, moment = beyond[index]
+        if index in lift:
+            force, moment = force + lift[index][0], moment + lift[index][1]
+        beyond[index] = (force, moment)
+        parent = int(model.body_parentid[index])
+        beyond[parent] = (beyond[parent][0] + force, beyond[parent][1] + moment)
+
+    # What each body's joint, or weld, passes to it from the body it hangs
+    # from: 'cfrc_int', less the lift beyond it. A body with no freedom of its
+    # own -- welded to the world, or to its parent -- has its contacts counted
+    # by MuJoCo on the body it is welded to rather than on itself, so they come
+    # out of its weld too: the weld holds against them.
+    held = {}
+    for index in range(1, nbody):
+        if index in free:
+            continue
+        force, moment = _spatial(state.cfrc_int[index], point_of(index))
+        force, moment = force - beyond[index][0], moment - beyond[index][1]
+        if index not in anchors and int(model.body_weldid[index]) != index and index in contacts_on:
+            force, moment = force - contacts_on[index][0], moment - contacts_on[index][1]
+        held[index] = (force, moment)
+
+    said = {}
+    for index in range(1, nbody):
+        name = body_name(mujoco, model, index, names)
+        mass = float(model.body_mass[index])
+        com = numpy.array(state.xipos[index], dtype=float)
+        loads = []
+
+        if index in held:
+            parent = int(model.body_parentid[index])
+            if index in anchors:
+                loads.append(
+                    _load(
+                        "joint",
+                        body_name(mujoco, model, parent, names),
+                        anchors[index],
+                        held[index],
+                        joint=joint_of[index],
+                    )
+                )
+            else:
+                loads.append(_load("fixed", body_name(mujoco, model, parent, names), state.xpos[index], held[index]))
+        for child in range(index + 1, nbody):
+            if int(model.body_parentid[child]) != index or child not in held:
+                continue
+            reversed_ = (-held[child][0], -held[child][1])
+            if child in anchors:
+                loads.append(
+                    _load(
+                        "joint",
+                        body_name(mujoco, model, child, names),
+                        anchors[child],
+                        reversed_,
+                        joint=joint_of[child],
+                    )
+                )
+            else:
+                loads.append(_load("fixed", body_name(mujoco, model, child, names), state.xpos[child], reversed_))
+        for (body, other), (force, moment, points, weight, count) in sorted(touching.items()):
+            if body != index:
+                continue
+            point = points / weight if weight > 0 else numpy.array(state.xipos[index], dtype=float)
+            loads.append(
+                _load("contact", body_name(mujoco, model, other, names), point, (force, moment), contacts=count)
+            )
+        loads.append(_load("gravity", name, com, _wrench(mass * gravity, com)))
+        if index in lift:
+            local = centre_of.get(index)
+            if local is None:
+                where = com
+            else:
+                where = state.xpos[index] + state.xmat[index].reshape(3, 3) @ local
+            force = lift[index][0]
+            # The lift at its centre of mass and the moment MuJoCo applies
+            # beside it are one force at the centre of buoyancy.
+            moment = lift[index][1] + numpy.array(state.xfrc_applied[index][3:6], dtype=float)
+            loads.append(_load("buoyancy", name, where, (force, moment)))
+
+        acceleration = numpy.zeros(6)
+        velocity = numpy.zeros(6)
+        if int(model.body_weldid[index]) != 0:
+            mujoco.mj_objectAcceleration(model, state, mujoco.mjtObj.mjOBJ_BODY, index, acceleration, 0)
+            mujoco.mj_objectVelocity(model, state, mujoco.mjtObj.mjOBJ_BODY, index, velocity, 0)
+            # MuJoCo's own has gravity taken off it, as an accelerometer reads.
+            acceleration[3:6] += gravity
+        # A body welded to the world does not move, and MuJoCo leaves its
+        # acceleration at nought rather than at an accelerometer's reading.
+        said[name] = {
+            "mass": mass,
+            "com": [float(v) * MM_PER_M for v in com],
+            "acc": [float(v) for v in acceleration[3:6]],
+            "angvel": [float(v) * DEG_PER_RAD for v in velocity[0:3]],
+            "angacc": [float(v) * DEG_PER_RAD for v in acceleration[0:3]],
+            "loads": loads,
+        }
+    return said
 
 
 def geometry(mujoco, model, data):
@@ -869,13 +1172,21 @@ def run(mujoco, path, request, started, console):
     # What PartCAD calls everything the model holds, out of the sidecar beside
     # it, and what each of its joints is.
     names = Names.beside(scene_file)
-    # Where the joints' efforts are worked out, so that working them out
-    # touches neither the run nor what the bodies are read from; see 'joints'.
-    # Not even made for a model with no joint to report -- a model of free
-    # bodies, which is what a scene of parts is -- so that one costs exactly
-    # what it did.
-    scratch = mujoco.MjData(model) if reported_joints(mujoco, model, names) else None
-    before = snapshot(mujoco, model, data, scratch, names)
+    # Whether every reading says what acts on each body (see 'body_loads'):
+    # yes, unless the 'simulate:' asked for nothing but poses.
+    loads = request.get("loads", True) is not False
+    centres = centres_of_buoyancy(mujoco, model)
+    if centres:
+        # Set before the first reading too, so that 'before' is read under the
+        # moment every later reading is; the loop sets it again every step.
+        apply_buoyancy_moments(model, data, centres)
+    # Where the joints' efforts and the bodies' loads are worked out, so that
+    # working them out touches neither the run nor what the bodies are read
+    # from; see 'evaluate'. Not even made for a model with no joint to report
+    # in a run that asked for no loads -- a model of free bodies, which is what
+    # a scene of parts is -- so that one costs exactly what it did.
+    scratch = mujoco.MjData(model) if loads or reported_joints(mujoco, model, names) else None
+    before = snapshot(mujoco, model, data, scratch, names, loads, centres)
     # What PartCAD would like a picture of, and what the scene looks like now,
     # for the first of them. Read now because by the end it has moved.
     pictures = request.get("snapshot")
@@ -887,7 +1198,6 @@ def run(mujoco, path, request, started, console):
     trace = []
     next_sample = duration / (samples + 1) if samples > 0 else None
     steps = 0
-    centres = centres_of_buoyancy(mujoco, model)
     guard = Guard(request, planned, started)
     # A model that is unstable from the start is one MuJoCo already warned
     # about while working out where everything is.
@@ -901,7 +1211,7 @@ def run(mujoco, path, request, started, console):
         diverged(mujoco, model, data, when, names)
         guard.check(steps, data.time, duration)
         if next_sample is not None and data.time >= next_sample:
-            trace.append(snapshot(mujoco, model, data, scratch, names))
+            trace.append(snapshot(mujoco, model, data, scratch, names, loads, centres))
             next_sample += duration / (samples + 1)
 
     if not_finite(data):
@@ -911,8 +1221,13 @@ def run(mujoco, path, request, started, console):
             "MuJoCo's simulation ended at t = %g s with a state that is not a finite number. %s"
             % (data.time, DIVERGED_REMEDY)
         )
-    after = snapshot(mujoco, model, data, scratch, names)
+    after = snapshot(mujoco, model, data, scratch, names, loads, centres)
     warnings.extend(degraded(mujoco, data))
+    if loads and (model.opt.density > 0 or model.opt.viscosity > 0):
+        warnings.append(
+            "the fluid's drag on each body is not one of its loads: MuJoCo applies it to the joints without saying"
+            " how much fell on which body, so each joint's load includes the drag on everything beyond it"
+        )
     warnings.extend("MuJoCo said: %s" % message for message in console.said)
     if pictures:
         looks["after"] = look(mujoco, model, data, warnings)
@@ -938,6 +1253,10 @@ def run(mujoco, path, request, started, console):
         result["medium"] = {"density": float(model.opt.density), "viscosity": float(model.opt.viscosity)}
     if trace:
         result["samples"] = trace
+    if loads and names.parts:
+        # Which body each part is welded into and where it sits in it, out of
+        # the sidecar: what turns a body's loads into a part's.
+        result["parts"] = names.parts
     drawn = take_snapshots(path, pictures, looks, warnings)
     if drawn:
         result["snapshots"] = drawn

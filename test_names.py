@@ -31,6 +31,14 @@ import kinematics  # noqa: E402
 import naming  # noqa: E402
 from test_export_joints import export, export_mjcf, in_a_scene, rig, stand_in_geometry, weighed  # noqa: E402,F401
 
+# Which parts a body is, in the sidecar and as a run's 'parts', is what a PartCAD
+# that can say writes ('kinematics.parts_entry()', read back by
+# 'naming.parts_of()'); an older one writes and runs the same model without it.
+NEEDS_PARTS = pytest.mark.skipif(
+    not hasattr(kinematics, "parts_entry") or not hasattr(naming, "parts_of"),
+    reason="this PartCAD cannot say which parts a body is (partcad/partcad#823)",
+)
+
 ARM_CALLED_WORLD = """
 links:
   - part: base
@@ -87,7 +95,32 @@ def test_a_body_called_world_is_written_under_another_name_and_the_sidecar_says_
     sidecar = naming.read_sidecar(str(path))
     assert sidecar["format"] == "mjcf"
     assert sidecar["names"]["body"] == {"world": "world-2", "cube": "cube"}
-    assert sidecar["bodies"] == {"world": {"path": ["world-2"]}, "cube": {"path": ["cube"]}}
+    assert {name: entry["path"] for name, entry in sidecar["bodies"].items()} == {
+        "world": ["world-2"],
+        "cube": ["cube"],
+    }
+
+
+@NEEDS_PARTS
+def test_the_sidecar_says_which_part_each_body_is(tmp_path, export_mjcf):
+    """By its path of labels, at the body's own frame: what a run reports as 'parts' (see 'naming.parts_of')."""
+    _result, path, _mujoco = export(export_mjcf, tmp_path, scene_of("world", "cube"), static=False, names_file=True)
+    sidecar = naming.read_sidecar(str(path))
+    assert sidecar["bodies"]["world"]["parts"] == [{"label": "world", "part": "//p:0", "placement": None}]
+    assert naming.parts_of(sidecar) == {
+        "world": {"part": "//p:0", "body": "world", "placement": None},
+        "cube": {"part": "//p:1", "body": "cube", "placement": None},
+    }
+
+
+def test_a_partcad_that_cannot_say_which_parts_a_body_is_still_gets_the_loads(tmp_path, export_mjcf, monkeypatch):
+    """A PartCAD from before 'kinematics.parts_entry()': the same model, and a run with loads and no 'parts'."""
+    monkeypatch.delattr(kinematics, "parts_entry", raising=False)
+    _result, path, _mujoco = export(export_mjcf, tmp_path, scene_of("world", "cube"), static=False, names_file=True)
+    assert naming.read_sidecar(str(path))["bodies"]["cube"]["parts"] == []
+    result = run(path)
+    assert "parts" not in result
+    assert [load["kind"] for load in result["after"]["bodies"]["cube"]["loads"]] == ["gravity"]
 
 
 def test_no_sidecar_is_written_unless_asked_for(tmp_path, export_mjcf):

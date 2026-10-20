@@ -132,7 +132,7 @@ def export_mjcf(monkeypatch):
     import ocp_serialize
 
     monkeypatch.setattr(ocp_serialize, "decode_shape", lambda obj: ("shape", obj.get("brep")))
-    monkeypatch.setattr(module, "write_mesh", lambda shape, path, options: shutil.copyfile(CUBE_STL, path))
+    monkeypatch.setattr(module, "write_mesh", mesh_copied_from(CUBE_STL))
     return module
 
 
@@ -190,6 +190,16 @@ def weighed(tree, physics=None, mass=0.1):
 
     walk(tree)
     return index
+
+
+def mesh_copied_from(source):
+    """A stand-in for 'export_mjcf.write_mesh': the mesh is a copy of 'source', written at the tolerance asked for."""
+
+    def write_mesh(shape, path, options):
+        shutil.copyfile(source, path)
+        return options["tolerance"], 12
+
+    return write_mesh
 
 
 def export(module, tmp_path, tree, name="model.xml", **request):

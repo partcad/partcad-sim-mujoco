@@ -379,22 +379,85 @@ def node_geometry(node):
     return ocp_serialize.decode_shape(without_placement)
 
 
+# The most triangles MuJoCo reads out of one STL file. Its decoder refuses a file
+# with more ("number of faces should be between 1 and 200000"), and the model with
+# it -- which a finely detailed part (a worm's thread, a knurled knob) reaches at
+# the default tolerance.
+MAX_STL_FACES = 200000
+
+# How many times a mesh MuJoCo could not read is triangulated again, each time
+# twice as coarse, before the export gives up on it.
+COARSER_ATTEMPTS = 8
+
+
+def triangle_count(shape):
+    """How many triangles the triangulation 'shape' carries now has."""
+    from OCP.BRep import BRep_Tool
+    from OCP.TopAbs import TopAbs_FACE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopLoc import TopLoc_Location
+    from OCP.TopoDS import TopoDS
+
+    count = 0
+    explorer = TopExp_Explorer(shape, TopAbs_FACE)
+    while explorer.More():
+        triangulation = BRep_Tool.Triangulation_s(TopoDS.Face_s(explorer.Current()), TopLoc_Location())
+        if triangulation is not None:
+            count += triangulation.NbTriangles()
+        explorer.Next()
+    return count
+
+
 def write_mesh(shape, path, options):
-    """Triangulate 'shape' and write it out as an STL file."""
+    """Triangulate 'shape' and write it out as an STL file; return the (tolerance, triangles) it was written at.
+
+    At the options' tolerance, unless that makes more triangles than MuJoCo
+    reads from one file ('MAX_STL_FACES'): then twice as coarse, and again,
+    until it does not -- a model with one mesh a little coarser than asked is
+    one MuJoCo can load, and one with a mesh it refuses is not. The caller
+    says so when it happens.
+    """
     from OCP.BRepMesh import BRepMesh_IncrementalMesh
+    from OCP.BRepTools import BRepTools
     from OCP.StlAPI import StlAPI_Writer
 
-    BRepMesh_IncrementalMesh(
-        shape,
-        theLinDeflection=options["tolerance"],
-        isRelative=True,
-        theAngDeflection=options["angularTolerance"],
-        isInParallel=True,
-    )
+    tolerance, angular = options["tolerance"], options["angularTolerance"]
+    previous = None
+    for attempt in range(COARSER_ATTEMPTS + 1):
+        BRepMesh_IncrementalMesh(
+            shape,
+            theLinDeflection=tolerance,
+            isRelative=True,
+            theAngDeflection=angular,
+            isInParallel=True,
+        )
+        triangles = triangle_count(shape)
+        if triangles <= MAX_STL_FACES:
+            break
+        if triangles == previous:
+            # Nothing to triangulate coarser: a mesh already (an imported STL
+            # keeps its triangles, whatever the tolerance), or that many flat
+            # faces, each a triangle or two at any tolerance.
+            raise Exception(
+                "%s has %d triangles, more than the %d MuJoCo reads from one mesh, and no coarser tolerance makes "
+                "fewer: it is a mesh already, or that many flat faces. Simplify it before it is simulated"
+                % (os.path.basename(path), triangles, MAX_STL_FACES)
+            )
+        if attempt == COARSER_ATTEMPTS:
+            raise Exception(
+                "%s has %d triangles at a tolerance of %g, more than the %d MuJoCo reads from one mesh: "
+                "give the export a coarser 'tolerance'" % (os.path.basename(path), triangles, tolerance, MAX_STL_FACES)
+            )
+        # A triangulation is kept on the shape and only ever refined, so the
+        # coarser one is made from nothing.
+        BRepTools.Clean_s(shape)
+        previous = triangles
+        tolerance, angular = tolerance * 2.0, min(angular * 2.0, 1.0)
     writer = StlAPI_Writer()
     writer.ASCIIMode = options["ascii"]
     if not writer.Write(shape, path) or not os.path.exists(path) or os.path.getsize(path) == 0:
         raise Exception("Failed to write the mesh file: %s" % path)
+    return tolerance, triangles
 
 
 def write_buoyancy(body, inertial, parts, state):
@@ -473,7 +536,12 @@ def mesh_asset(shape, node, body_name, state):
         return asset_name
 
     asset_name = state["mesh_names"].derive(node.get("label") or body_name, "mesh")
-    write_mesh(shape, os.path.join(state["mesh_dir"], "%s.stl" % asset_name), state["options"])
+    tolerance, _triangles = write_mesh(shape, os.path.join(state["mesh_dir"], "%s.stl" % asset_name), state["options"])
+    if tolerance != state["options"]["tolerance"]:
+        state["warnings"].append(
+            "'%s' has more triangles than MuJoCo reads from one mesh at a tolerance of %g, so it is written at %g"
+            % (node.get("label") or body_name, state["options"]["tolerance"], tolerance)
+        )
     mesh = ElementTree.SubElement(state["asset"], "mesh")
     mesh.set("name", asset_name)
     mesh.set("file", "%s/%s.stl" % (state["mesh_dir_name"], asset_name))
@@ -646,6 +714,13 @@ def emit_body(parent, body, pose, state):
             )
         return None
 
+    # Which parts this body is, for the sidecar: what lets a run say which
+    # body a part is in and where, and so read a body's loads as a part's. A
+    # PartCAD from before 'parts_entry()' cannot say, and its runs report the
+    # loads without 'parts'.
+    parts_entry = getattr(kinematics, "parts_entry", None)
+    if parts_entry is not None:
+        state["body_parts"][body.name] = parts_entry(body)
     state["unsupported"].update(set(own) - MJCF_STATED)
     for _, part, _shape in shapes:
         state["unsupported"].update(set(part.physics) - MJCF_STATED)
@@ -1329,6 +1404,9 @@ def process(path, request):
         # The reported name of every MJCF joint -> where it is and whose
         # freedom it is, for the sidecar; see 'write_names'.
         "reported_joints": {},
+        # PartCAD body -> the parts welded into it, for the sidecar; see
+        # 'write_names'.
+        "body_parts": {},
         "meshes": {},
         "mesh_dir": mesh_dir,
         "mesh_dir_name": mesh_dir_name,
@@ -1424,13 +1502,18 @@ def write_names(path, model_name, root, state):
     a floating joint's '<freejoint>'), which PartCAD joint that is a freedom
     of, and its joint map ('"map"', 'kinematics.joint_map()'): what the MJCF
     joint is in PartCAD's terms, which a run turns MuJoCo's values back into
-    PartCAD's by ('kinematics.reading()'). One file from the exporter to the
+    PartCAD's by ('kinematics.reading()'), and which parts each body is welded
+    from and where ('kinematics.parts_entry()'), which is how a run says which
+    body a part is in. One file from the exporter to the
     simulation, as section 8.13.5 of PartCAD's simulation design record
     decided, rather than a map written into the model in a spelling of its own.
     The model's name is the scene's, which MJCF never needs to change but a
     reader should not have to know that.
     """
-    bodies = {name: {"path": [internal]} for name, internal in state["body_names"].mapping().get("body", {}).items()}
+    bodies = {
+        name: {"path": [internal], "parts": state["body_parts"].get(name, [])}
+        for name, internal in state["body_names"].mapping().get("body", {}).items()
+    }
     names = naming.merged_mapping(state["body_names"], state["joint_names"])
     names["scene"] = {str(root.get("label") or model_name): model_name}
     return naming.write_sidecar(path, "mjcf", names, bodies, dict(state["reported_joints"]))
