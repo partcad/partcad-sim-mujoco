@@ -1384,7 +1384,11 @@ def export_mjcf_module():
 def tilted_stack(export_mjcf, monkeypatch, tmp_path, name, mu, tilt=15.0, floor=None, **options):
     """Two 10 mm cubes, one on the other, at 'mu', in a world tilted by 'tilt' degrees.
 
-    What MuJoCo did with them for three seconds: how far each moved, in mm.
+    What MuJoCo did with them for three seconds: how far each one's centre of
+    mass moved, in mm. Not its origin, which is a corner of the cube: a block
+    that slides off another tumbles as it goes over the edge, and where that
+    corner lands depends on how far it turned - a quarter turn with MuJoCo
+    3.16, half a turn with 3.17, for the same fall onto the same floor.
     """
     import math
     import shutil
@@ -1425,7 +1429,7 @@ def tilted_stack(export_mjcf, monkeypatch, tmp_path, name, mu, tilt=15.0, floor=
         path.write_text(text, encoding="utf-8")
     result = simulate_mujoco.process(str(tmp_path), {"scene_file": str(path), "duration": 3.0})
     before, after = result["before"]["bodies"], result["after"]["bodies"]
-    return {body: [a - b for a, b in zip(after[body]["pos"], before[body]["pos"])] for body in before}
+    return {body: [a - b for a, b in zip(after[body]["com"], before[body]["com"])] for body in before}
 
 
 def test_a_stack_holds_or_slides_as_its_friction_says(export_mjcf, monkeypatch, tmp_path):
