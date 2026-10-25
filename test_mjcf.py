@@ -671,6 +671,24 @@ def test_a_shape_used_twice_is_written_once(export_mjcf, tmp_path):
     assert [body.get("name") for body in mujoco.findall("worldbody/body")] == ["cube", "cube-2"]
 
 
+def test_everything_written_besides_the_model_is_said_so_partcad_can_cache_it(export_mjcf, tmp_path):
+    """'files' is what PartCAD caches an export with, and puts back under the name asked for next.
+
+    Relative to the model's directory, and named after the model: the meshes
+    under '<stem>_meshes/', and the sidecar of names when one is asked for.
+    """
+    cube = envelope("//p:cube", "cube", b"CUBE")
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [cube]}
+
+    result, _ = exported(export_mjcf, tmp_path / "bench.xml", root)
+    assert result["files"] == ["bench_meshes/cube.stl"]
+
+    result, _ = exported(export_mjcf, tmp_path / "bench.xml", root, names_file=True)
+    assert result["files"] == ["bench_meshes/cube.stl", "bench.xml.names.json"]
+    for name in result["files"]:
+        assert os.path.isfile(str(tmp_path / name))
+
+
 def test_a_scene_is_welded_to_the_world_unless_told_otherwise(export_mjcf, tmp_path):
     """A scene states where things are, so nothing in it is meant to move."""
     root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
