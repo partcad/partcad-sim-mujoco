@@ -1475,8 +1475,16 @@ def process(path, request):
         f.write('<?xml version="1.0" ?>\n')
         f.write(ElementTree.tostring(mujoco, encoding="unicode"))
         f.write("\n")
+    meshes = sorted("%s/%s.stl" % (mesh_dir_name, name) for name in set(state["meshes"].values()))
+    # What was written besides 'path', relative to its directory: what lets
+    # PartCAD cache this export and put it back whole (its 'files' result key).
+    # Every name begins the way 'path' does - 'robot.xml' writes
+    # 'robot_meshes/...' and 'robot.xml.names.json' - which is what lets a cached
+    # model be put back under another name.
+    files = list(meshes)
     if request.get("names_file"):
         write_names(path, model_name, root, state)
+        files.append(os.path.basename(naming.sidecar_path(path)))
     else:
         naming.remove_sidecar(path)
 
@@ -1485,7 +1493,8 @@ def process(path, request):
         "exception": None,
         "model_name": model_name,
         "mesh_dir": mesh_dir,
-        "meshes": sorted("%s/%s.stl" % (mesh_dir_name, name) for name in set(state["meshes"].values())),
+        "meshes": meshes,
+        "files": files,
         "warnings": warnings,
         # Properties PartCAD holds and MJCF cannot state. Reported at info level
         # by the caller: nothing is wrong with the file, it just says less than
