@@ -57,6 +57,9 @@ jobs:
           # run end to end rather than being skipped (`test_snapshot.py`). The
           # same range the plugin's `pythonRequirements` asks the sandbox for.
           python -m pip install "mujoco>=3.2,<4,!=3.15.0"
+          # And the FFmpeg the video of a run is encoded with, as the
+          # simulation's `pythonRequirements` asks the sandbox for it.
+          python -m pip install "imageio-ffmpeg>=0.5,<1"
 
       - name: Run the tests
         run: pytest -v

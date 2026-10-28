@@ -453,8 +453,15 @@ simulation:
     # set"). Excluding it lets pip take 3.14.0 there and keeps every other
     # platform on the newest release; a later 3.x that restores the wheel is
     # picked up without another change here.
+    #
+    # And FFmpeg, for the video of the run PartCAD asks for: the one the
+    # `imageio-ffmpeg` wheel carries, a program rather than a Python module,
+    # with a wheel for every platform a sandbox runs on and no Python version
+    # of its own. Only the program is used (see 'Encoder' in
+    # 'snapshot_raster.py'), so any release that ships one will do.
     pythonRequirements:
       - mujoco>=3.2,<4,!=3.15.0
+      - imageio-ffmpeg>=0.5,<1
     # The format the scene is handed over in, resolved in this package: the
     # `export:` entry above is what writes it. PartCAD exports the scene before
     # this script is started, so this is what decides which exporter runs rather
@@ -513,6 +520,12 @@ simulation:
     # They are drawn on the CPU from MuJoCo's compiled model, with numpy -- which
     # MuJoCo already brings, so there is nothing to add to 'pythonRequirements'.
     # See 'snapshot_raster.py' for why not with MuJoCo's own OpenGL renderer.
+    #
+    # Nor is the video of the run PartCAD asks for beside them: its frame rate,
+    # its size and where it is taken from are the request's too. It is drawn
+    # the same way, frame by frame, once the run is over, and encoded as WebM
+    # by FFmpeg -- the one requirement above that it adds. One that cannot be
+    # made in what is left of the run's budget is a warning, not a failure.
 
 open:
   mujoco:
