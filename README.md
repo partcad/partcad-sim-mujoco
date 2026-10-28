@@ -429,6 +429,43 @@ is lower in the frame and further along the floor, rather than re-centred.
 A picture that cannot be drawn is a warning, never a failed run: the verdict
 does not depend on it.
 
+## Video
+
+PartCAD also asks every run for a video of the whole of it, from the same
+viewpoint, at the frame rate and the size it names — 25 frames a second, and
+1280×720 unless the machine's `simulation.videoResolution` says otherwise:
+
+```json
+"video": {"format": "webm", "file": "video.webm", "fps": 25, "width": 1280, "height": 720,
+          "viewport_origin": [100, -100, 100], "viewport_up": [0, 0, 1]}
+```
+
+A frame is due every 1/25 s of simulated time, from the start of the run to
+its end, so the video plays the run in real time: 251 frames for the default
+ten seconds. While MuJoCo steps, only where every geom is at each frame's
+instant is kept; the frames are drawn from that once the run is over, by the
+same CPU renderer as the snapshots, and framed alike on everything any of them
+holds. They are encoded as WebM with VP9 in it — the pairing every browser
+plays, the Visual Studio Code webview the PartCAD IDE draws in included, which
+plays no H.264 — by the FFmpeg the `imageio-ffmpeg` wheel carries, which is why
+that is among this simulation's `pythonRequirements`. The file goes into the
+run directory beside the snapshots, and is reported as
+
+```json
+{"video": "video.webm"}
+```
+
+It is what the IDE's **Validation → Simulation** tab plays, with the before
+and after pictures as the still it shows until it is played.
+
+A video costs the run more than anything else it does — the stepping of a
+small scene takes a fraction of a second, and its frames a few seconds — so
+they are drawn on up to four threads, the floor once for all of them, and a
+frame draws again only what moved. It never costs the run its answer: it is
+drawn last, inside what is left of the run's budget, and one that would not be
+finished in time is given up, as is one that cannot be drawn or encoded on
+this machine, with a warning saying why.
+
 ## Parameters
 
 Set any of these as fields of the simulation (per package), or in the `params:`
@@ -668,10 +705,13 @@ and runs a scene with a body called `world` and a pendulum whose arm is called
 that: every body and joint comes back under PartCAD's name. It needs `partcad`,
 and `mujoco` for the runs.
 
-`test_snapshot.py` needs numpy for the pictures, and MuJoCo for the half that
-runs the simulation end to end — a stack whose top block falls off, drawn
-before and after. That half is skipped where MuJoCo is not installed; CI
-installs it.
+`test_snapshot.py` needs numpy for the pictures, `imageio-ffmpeg` for the
+videos, and MuJoCo for the half that runs the simulation end to end — a stack
+whose top block falls off, drawn before and after and filmed. The renderer is
+held to a plain one-pixel-at-a-time fill of triangles of every size, a frame of
+a video to the same picture drawn afresh, and a closed surface drawn without
+its back to the same surface drawn whole. What needs MuJoCo or FFmpeg is
+skipped where they are not installed; CI installs both.
 
 `test_export_joints.py` exports the trees PartCAD itself builds for every kind
 of joint — a package of cubes composed by PartCAD's own ASSY code, with a

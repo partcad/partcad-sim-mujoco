@@ -22,9 +22,11 @@ metres MuJoCo works in. A validation expression is written by whoever wrote the
 part, against the numbers that part is drawn in.
 
 It also draws the two pictures PartCAD asks for -- the scene before and after,
-from the viewpoint the request names -- out of the very model it steps; see
-'snapshot_raster.py'. They never decide anything: a picture that cannot be
-drawn is a warning beside the result.
+from the viewpoint the request names -- out of the very model it steps, and
+records the video of the whole run it asks for beside them, from the same
+viewpoint, a frame every 1/25 s of simulated time; see 'snapshot_raster.py' and
+'Film'. They never decide anything: a picture or a video that cannot be made is
+a warning beside the result.
 
 Nothing here is specific to what is being simulated. A body is a body, and the
 reading is "where is it and which way is it facing" -- which is all a static
@@ -999,57 +1001,94 @@ def body_loads(mujoco, model, state, names=AS_WRITTEN, centres=()):
     return said
 
 
-def geometry(mujoco, model, data):
-    """What the scene looks like right now, in the terms 'snapshot_raster' draws.
+class Look:
+    """What the scene looks like, read once out of the compiled model: every geom in its own frame.
 
-    MuJoCo's own compiled geometry at MuJoCo's own poses: a mesh geom is the
-    mesh MuJoCo loaded (re-centred on its own frame, which is the frame the geom
-    is placed in), a primitive is tessellated, and a plane is the floor. Every
-    geom of one body is one thing, so the outlines are drawn around bodies
-    rather than around the pieces a body was written as.
+    MuJoCo's own compiled geometry: a mesh geom is the mesh MuJoCo loaded
+    (re-centred on its own frame, which is the frame the geom is placed in), a
+    primitive is tessellated, and a plane is the floor. Every geom of one body
+    is one thing, so the outlines are drawn around bodies rather than around
+    the pieces a body was written as.
+
+    'pose' is where its geoms are at one instant -- all a frame of the video
+    keeps while the run goes on -- and 'at' is the scene placed there, in the
+    terms 'snapshot_raster' draws.
     """
-    import snapshot_raster
 
-    solids, planes = [], []
-    for index in range(model.ngeom):
-        material = model.geom_matid[index]
-        rgba = model.mat_rgba[material] if material >= 0 else model.geom_rgba[index]
-        if rgba[3] <= 0 or model.geom_group[index] >= VISIBLE_GROUPS:
-            continue
-        kind = model.geom_type[index]
-        rotation = data.geom_xmat[index].reshape(3, 3)
-        position = data.geom_xpos[index]
-        size = model.geom_size[index]
-        color = [float(v) for v in rgba[:3]]
-        if kind == mujoco.mjtGeom.mjGEOM_PLANE:
-            planes.append({"origin": position.copy(), "axes": rotation.copy(), "color": color})
-            continue
-        if kind == mujoco.mjtGeom.mjGEOM_MESH:
-            mesh = model.geom_dataid[index]
-            start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
-            first, faces = model.mesh_faceadr[mesh], model.mesh_facenum[mesh]
-            local = model.mesh_vert[start : start + count][model.mesh_face[first : first + faces]]
-        elif kind == mujoco.mjtGeom.mjGEOM_BOX:
-            local = snapshot_raster.box(size)
-        elif kind == mujoco.mjtGeom.mjGEOM_SPHERE:
-            local = snapshot_raster.ellipsoid(size[0], size[0], size[0])
-        elif kind == mujoco.mjtGeom.mjGEOM_ELLIPSOID:
-            local = snapshot_raster.ellipsoid(size[0], size[1], size[2])
-        elif kind == mujoco.mjtGeom.mjGEOM_CYLINDER:
-            local = snapshot_raster.cylinder(size[0], size[1])
-        elif kind == mujoco.mjtGeom.mjGEOM_CAPSULE:
-            local = snapshot_raster.capsule(size[0], size[1])
-        else:
-            # A height field or an SDF: nothing a scene PartCAD wrote holds.
-            continue
-        solids.append(
-            {
-                "triangles": snapshot_raster.place(local, rotation, position),
-                "color": color,
-                "id": int(model.geom_bodyid[index]),
-            }
-        )
-    return {"solids": solids, "planes": planes}
+    def __init__(self, mujoco, model):
+        import numpy
+        import snapshot_raster
+
+        self.geoms = []
+        self.solids = []
+        self.planes = []
+        for index in range(model.ngeom):
+            material = model.geom_matid[index]
+            rgba = model.mat_rgba[material] if material >= 0 else model.geom_rgba[index]
+            if rgba[3] <= 0 or model.geom_group[index] >= VISIBLE_GROUPS:
+                continue
+            kind = model.geom_type[index]
+            size = model.geom_size[index]
+            color = [float(v) for v in rgba[:3]]
+            if kind == mujoco.mjtGeom.mjGEOM_PLANE:
+                self.planes.append((len(self.geoms), color))
+                self.geoms.append(index)
+                continue
+            if kind == mujoco.mjtGeom.mjGEOM_MESH:
+                mesh = model.geom_dataid[index]
+                start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
+                first, faces = model.mesh_faceadr[mesh], model.mesh_facenum[mesh]
+                local = model.mesh_vert[start : start + count][model.mesh_face[first : first + faces]]
+            elif kind == mujoco.mjtGeom.mjGEOM_BOX:
+                local = snapshot_raster.box(size)
+            elif kind == mujoco.mjtGeom.mjGEOM_SPHERE:
+                local = snapshot_raster.ellipsoid(size[0], size[0], size[0])
+            elif kind == mujoco.mjtGeom.mjGEOM_ELLIPSOID:
+                local = snapshot_raster.ellipsoid(size[0], size[1], size[2])
+            elif kind == mujoco.mjtGeom.mjGEOM_CYLINDER:
+                local = snapshot_raster.cylinder(size[0], size[1])
+            elif kind == mujoco.mjtGeom.mjGEOM_CAPSULE:
+                local = snapshot_raster.capsule(size[0], size[1])
+            else:
+                # A height field or an SDF: nothing a scene PartCAD wrote holds.
+                continue
+            # Turned outward where it is a closed surface, whose back need not
+            # be drawn: half of what a frame costs.
+            local, closed = snapshot_raster.outward(local)
+            self.solids.append((len(self.geoms), local, closed, color, int(model.geom_bodyid[index])))
+            self.geoms.append(index)
+        self.indices = numpy.array(self.geoms, dtype=int)
+
+    def pose(self, data):
+        """Where every geom drawn is right now: (positions, rotation matrices), copied."""
+        return data.geom_xpos[self.indices].copy(), data.geom_xmat[self.indices].copy()
+
+    def at(self, pose):
+        """The scene with every geom where 'pose' puts it."""
+        import snapshot_raster
+
+        positions, rotations = pose
+        return {
+            "solids": [
+                {
+                    "triangles": snapshot_raster.place(local, rotations[i].reshape(3, 3), positions[i]),
+                    "closed": closed,
+                    "color": color,
+                    "id": body,
+                }
+                for i, local, closed, color, body in self.solids
+            ],
+            "planes": [
+                {"origin": positions[i].copy(), "axes": rotations[i].reshape(3, 3).copy(), "color": color}
+                for i, color in self.planes
+            ],
+        }
+
+
+def geometry(mujoco, model, data):
+    """What the scene looks like right now, in the terms 'snapshot_raster' draws (see 'Look')."""
+    look = Look(mujoco, model)
+    return look.at(look.pose(data))
 
 
 def look(mujoco, model, data, warnings):
@@ -1079,6 +1118,58 @@ def take_snapshots(path, snapshot, scenes, warnings):
     except Exception as e:  # pylint: disable=broad-except
         warnings.append("the snapshots could not be drawn: %s: %s" % (type(e).__name__, e))
         return {}
+
+
+class Film:
+    """The video PartCAD asked for, as the run goes: where every geom was at each frame's instant.
+
+    A frame is due every 1/fps seconds of simulated time, from the start of the
+    run to its end ('snapshot_raster.frame_times'), so the video plays the run
+    in real time. Only the geoms' poses are kept while the run goes on -- a few
+    numbers a geom -- and the pictures are drawn from them once it is over, by
+    'record'. A step longer than a frame is shown for as many frames as it
+    lasted. Nothing here can fail the run: a film that cannot be made is a
+    warning beside its result.
+    """
+
+    def __init__(self, mujoco, model, video, duration, warnings):
+        import snapshot_raster
+
+        self.video = video
+        self.times = snapshot_raster.frame_times(duration, video.get("fps") or snapshot_raster.DEFAULT_FPS)
+        self.poses = []
+        self.look = None
+        try:
+            self.look = Look(mujoco, model)
+        except Exception as e:  # pylint: disable=broad-except
+            warnings.append("the scene could not be read for the video: %s: %s" % (type(e).__name__, e))
+
+    def watch(self, data):
+        """Keep where everything is, for every frame due by now."""
+        if self.look is None:
+            return
+        while len(self.poses) < len(self.times) and data.time >= self.times[len(self.poses)] - FRAME_SLACK:
+            self.poses.append(self.look.pose(data))
+
+    def record(self, path, deadline, warnings):
+        """Draw and encode the video, and return its file relative to 'path' -- or None, and a warning."""
+        if self.look is None or not self.poses or not path:
+            return None
+        try:
+            import snapshot_raster
+
+            return snapshot_raster.record(
+                path, self.video, len(self.poses), lambda index: self.look.at(self.poses[index]), deadline
+            )
+        except Exception as e:  # pylint: disable=broad-except
+            warnings.append("the video could not be recorded: %s: %s" % (type(e).__name__, e))
+            return None
+
+
+# How far short of a frame's instant the simulated clock may be and still be
+# taken to have reached it: the clock is a sum of steps, and 0.002 added five
+# hundred times is not quite one.
+FRAME_SLACK = 1e-9
 
 
 class Console:
@@ -1194,6 +1285,11 @@ def run(mujoco, path, request, started, console):
     looks = {}
     if pictures:
         looks["before"] = look(mujoco, model, data, warnings)
+    # The video PartCAD would like of the whole run, from the same viewpoint:
+    # its first frame is this instant.
+    film = Film(mujoco, model, request["video"], duration, warnings) if request.get("video") else None
+    if film is not None:
+        film.watch(data)
 
     trace = []
     next_sample = duration / (samples + 1) if samples > 0 else None
@@ -1210,6 +1306,8 @@ def run(mujoco, path, request, started, console):
         steps += 1
         diverged(mujoco, model, data, when, names)
         guard.check(steps, data.time, duration)
+        if film is not None:
+            film.watch(data)
         if next_sample is not None and data.time >= next_sample:
             trace.append(snapshot(mujoco, model, data, scratch, names, loads, centres))
             next_sample += duration / (samples + 1)
@@ -1260,6 +1358,13 @@ def run(mujoco, path, request, started, console):
     drawn = take_snapshots(path, pictures, looks, warnings)
     if drawn:
         result["snapshots"] = drawn
+    if film is not None:
+        # Last, and inside what is left of the budget: the run has its answer
+        # by now, and a video that would not be finished in time is given up
+        # rather than allowed to cost the run that answer.
+        recorded = film.record(path, guard.deadline, warnings)
+        if recorded:
+            result["video"] = recorded
     if warnings:
         result["warnings"] = warnings
     return result
