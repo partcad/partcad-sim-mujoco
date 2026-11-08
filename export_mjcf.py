@@ -7,8 +7,9 @@
 
 Writes a PartCAD scene -- or an assembly, or any other shape -- as an MJCF
 ``.xml`` model plus the mesh files it references. MJCF is what MuJoCo describes
-a model in, and this is the format `pc sim` hands a scene over in: a simulation
-plugin is given a file, and for the MuJoCo plugin that file is this one.
+a model in, and this is the format `pc qual test --simulation` hands a scene
+over in: a simulation plugin is given a file, and for the MuJoCo plugin that
+file is this one.
 
 Like PartCAD's URDF exporter, this one writes the assembly *tree* rather than
 the geometry it decodes to: PartCAD hands every exporter that tree as
@@ -128,11 +129,11 @@ import urdf_common  # noqa: E402
 MESH_SCALE = 1.0 / urdf_common.MM_PER_M
 
 # MuJoCo's own gravity, written when nothing states another: the scene, the
-# 'gravity' option of this export, and a 'simulate:' that passes one to the
-# simulation (which applies it over the file) all win over it, in the reverse of
-# that order. Earth's, along -Z, which is what every scene meant before a scene
-# could say anything else -- and spelled out rather than left out of the file, so
-# that a model opened on its own says which way is down.
+# 'gravity' option of this export, and a 'qual: sim:' entry that passes one to
+# the simulation (which applies it over the file) all win over it, in the reverse
+# of that order. Earth's, along -Z, which is what every scene meant before a
+# scene could say anything else -- and spelled out rather than left out of the
+# file, so that a model opened on its own says which way is down.
 DEFAULT_GRAVITY = (0.0, 0.0, -9.81)
 
 # What MuJoCo makes of a fluid, so that nobody has to find out from a result.
@@ -336,12 +337,12 @@ def model_name_of(name, fallback):
     """The MJCF model's name for a PartCAD object's name.
 
     A parameterized object's name also carries its parameter values, after a
-    ';'. Those are dropped rather than spelled out: `pc sim` runs a scene whose
-    subject *is* a parameter, so keeping them would make the model's name a
-    transcription of the whole declaration -- and a name is read, not parsed.
-    Which instance it is is what the run is about and is reported beside the
-    file, not smuggled into it. What is left is the scene's own name, 'world'
-    included: MJCF reserves that for a body, not for a model.
+    ';'. Those are dropped rather than spelled out: `pc qual test --simulation`
+    runs a scene whose subject *is* a parameter, so keeping them would make the
+    model's name a transcription of the whole declaration -- and a name is
+    read, not parsed. Which instance it is is what the run is about and is
+    reported beside the file, not smuggled into it. What is left is the scene's
+    own name, 'world' included: MJCF reserves that for a body, not for a model.
     """
     return naming.transcode(MJCF_NAMES, str(name or "").partition(";")[0], fallback)
 
