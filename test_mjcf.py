@@ -992,7 +992,7 @@ def test_ascii_stl_is_reported_because_mujoco_cannot_read_it(export_mjcf, tmp_pa
 
 
 def test_a_parameterized_name_does_not_become_the_model_name(export_mjcf, tmp_path):
-    """What `pc sim` produces: a scene whose subject is a parameter."""
+    """What `pc qual test --simulation` produces: a scene whose subject is a parameter."""
     root = {
         "name": "//p:subject;subject=//p:block,subject_kind=part",
         "label": "subject;subject=//p:block,subject_kind=part",
@@ -1347,7 +1347,7 @@ def test_what_floats_rises_and_what_does_not_sinks(export_mjcf, monkeypatch, tmp
 
 
 def test_a_gravity_the_simulation_is_handed_beats_the_one_in_the_model(tmp_path):
-    """'params: {gravity: ...}' on a 'simulate:' is the explicit, per-run answer."""
+    """'params: {gravity: ...}' on a 'qual: sim:' entry is the explicit, per-run answer."""
     pytest.importorskip("mujoco")
     import simulate_mujoco
 

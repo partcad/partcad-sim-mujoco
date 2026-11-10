@@ -13,9 +13,9 @@ written, a ground plane under it, under the scene's gravity and in the fluid the
 scene is filled with, if it says either -- so all this does is load the model,
 step it, and
 take the same reading twice: once before anything has moved and once when the
-time is up. That pair is what a ``simulate:``'s ``validation:`` expression is
-handed, and it is the whole of what PartCAD requires a simulation plugin to
-produce.
+time is up. That pair is what a ``qual: sim:`` entry's ``validation:``
+expression is handed, and it is the whole of what PartCAD requires a simulation
+plugin to produce.
 
 Positions are reported in **millimetres**, PartCAD's unit everywhere, not in the
 metres MuJoCo works in. A validation expression is written by whoever wrote the
@@ -1238,13 +1238,13 @@ def run(mujoco, path, request, started, console):
     gravity = request.get("gravity")
     if gravity:
         # The exported model already carries the scene's gravity, or MuJoCo's
-        # own when the scene states none. This is only here when the 'simulate:'
-        # that asked for the run passed one in 'params' -- this package's
-        # declaration deliberately states no default, because a default here
-        # would override every scene's -- and it is the explicit, per-run answer
-        # that beats the scene's. A body's buoyancy is a fraction of its weight
-        # ('gravcomp'), so it follows the new gravity without anything else
-        # being rewritten.
+        # own when the scene states none. This is only here when the
+        # 'qual: sim:' entry that asked for the run passed one in 'params' --
+        # this package's declaration deliberately states no default, because a
+        # default here would override every scene's -- and it is the explicit,
+        # per-run answer that beats the scene's. A body's buoyancy is a fraction
+        # of its weight ('gravcomp'), so it follows the new gravity without
+        # anything else being rewritten.
         model.opt.gravity[:] = [float(v) for v in gravity]
 
     data = mujoco.MjData(model)
@@ -1264,7 +1264,7 @@ def run(mujoco, path, request, started, console):
     # it, and what each of its joints is.
     names = Names.beside(scene_file)
     # Whether every reading says what acts on each body (see 'body_loads'):
-    # yes, unless the 'simulate:' asked for nothing but poses.
+    # yes, unless the 'qual: sim:' entry asked for nothing but poses.
     loads = request.get("loads", True) is not False
     centres = centres_of_buoyancy(mujoco, model)
     if centres:

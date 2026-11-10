@@ -20,19 +20,20 @@ scenes:
 assemblies:
   stack:
     type: assy
-    simulate:
-      stands:
-        simulation: sim-mujoco:mujoco
-        offset: [[0, 0, 10], [0, 0, 1], 0]
-        validation: |
-          max(
-              abs(after["bodies"][name]["pos"][2] - before["bodies"][name]["pos"][2])
-              for name in before["bodies"]
-          ) < 2.0
+    qual:
+      sim:
+        stands:
+          path: sim-mujoco:mujoco
+          offset: [[0, 0, 10], [0, 0, 1], 0]
+          validation: |
+            max(
+                abs(after["bodies"][name]["pos"][2] - before["bodies"][name]["pos"][2])
+                for name in before["bodies"]
+            ) < 2.0
 ```
 
 ```console
-$ pc sim -a stack
+$ pc qual test --simulation -a stack
 INFO: //your/package:stack: the simulation 'stands' validated
 ```
 
@@ -414,8 +415,8 @@ reports them beside the result:
 {"snapshots": {"before": "snapshot-before.png", "after": "snapshot-after.png"}}
 ```
 
-They are what the PartCAD IDE's **Validation → Simulation** tab shows side by
-side, and `pc sim` says where they were written.
+They are what the PartCAD IDE's **Qualification → Simulation** tab shows side by
+side, and `pc qual test --simulation` says where they were written.
 
 They are MuJoCo's own compiled geometry — its meshes and its primitives — at
 MuJoCo's own poses, rasterized on the CPU with numpy (`snapshot_raster.py`).
@@ -455,7 +456,7 @@ run directory beside the snapshots, and is reported as
 {"video": "video.webm"}
 ```
 
-It is what the IDE's **Validation → Simulation** tab plays, with the before
+It is what the IDE's **Qualification → Simulation** tab plays, with the before
 and after pictures as the still it shows until it is played.
 
 A video costs the run more than anything else it does — the stepping of a
@@ -469,7 +470,7 @@ this machine, with a warning saying why.
 ## Parameters
 
 Set any of these as fields of the simulation (per package), or in the `params:`
-of one `simulate:` entry (per simulation).
+of one `qual: sim:` entry (per simulation).
 
 | Parameter | Default | What it is |
 | --- | --- | --- |
@@ -659,16 +660,17 @@ mass, so it follows any `gravity` a run is given. What that leaves out:
 * **A surface.** The fluid fills the whole world. A body lighter than it rises
   for as long as the run lasts, at the speed its drag allows, rather than coming
   to float at a waterline.
-* **The centre of buoyancy, outside `pc sim`.** The lift acts at the centre of
-  buoyancy -- the centroid of what the body displaces, PartCAD's
-  `centerOfVolume` combined per body by `mass_properties.displacement_of()` --
-  which is what rights a body whose weight is not centred where its volume is:
-  a hull with a heavy keel, a float that states a low `centerOfMass`. MJCF has
-  no way to say where a force acts, so `gravcomp` applies it at the centre of
-  mass and the simulation adds the moment `(r_buoyancy − r_mass) × lift` to the
-  body every step, through `xfrc_applied`, from the centre of buoyancy the
-  exporter writes as a custom numeric. The same model opened in MuJoCo's viewer
-  floats but does not right itself.
+* **The centre of buoyancy, outside `pc qual test --simulation`.** The lift
+  acts at the centre of buoyancy -- the centroid of what the body displaces,
+  PartCAD's `centerOfVolume` combined per body by
+  `mass_properties.displacement_of()` -- which is what rights a body whose
+  weight is not centred where its volume is: a hull with a heavy keel, a float
+  that states a low `centerOfMass`. MJCF has no way to say where a force acts,
+  so `gravcomp` applies it at the centre of mass and the simulation adds the
+  moment `(r_buoyancy − r_mass) × lift` to the body every step, through
+  `xfrc_applied`, from the centre of buoyancy the exporter writes as a custom
+  numeric. The same model opened in MuJoCo's viewer floats but does not right
+  itself.
 * **Partial submersion.** There is no surface, so nothing is ever half in the
   water. A waterline would need the volume below it and that volume's centroid
   every step, out of the mesh -- geometry the simulation would have to do
@@ -680,12 +682,12 @@ mass, so it follows any `gravity` a run is given. What that leaves out:
   *ellipsoid* model (`fluidshape="ellipsoid"`), which needs five coefficients
   per geom that nothing in a PartCAD scene states. It is not written.
 
-**Which gravity wins.** In order: a `simulate:`'s own `params: {gravity: ...}`,
-for that run; the scene's `gravity:`; MuJoCo's `[0, 0, -9.81]`. An explicit
-`gravity` on the `mjcf` export does the same for a file written with
-`pc export`. Neither this package's export nor its simulation states a default
-of its own any more — until PartCAD scenes could say anything, a default there
-was harmless, and now it would beat every scene that does.
+**Which gravity wins.** In order: a `qual: sim:` entry's own
+`params: {gravity: ...}`, for that run; the scene's `gravity:`; MuJoCo's
+`[0, 0, -9.81]`. An explicit `gravity` on the `mjcf` export does the same for a
+file written with `pc export`. Neither this package's export nor its simulation
+states a default of its own any more — until PartCAD scenes could say anything,
+a default there was harmless, and now it would beat every scene that does.
 
 ## Tests
 
@@ -763,7 +765,7 @@ model reported as MuJoCo has it. It needs MuJoCo too.
 
 The simulation used to ship inside the `partcad` wheel as `//builtin/simulate`,
 and the reader, the writer and the `open:` entry did until 0.8.80. None of them
-should: PartCAD ships the *concept* — the `simulate:` section, the sandbox
+should: PartCAD ships the *concept* — the `qual: sim:` section, the sandbox
 wrapper, the runner, the sections a package declares — and a simulator is
 somebody's program with a release cycle of its own. Pinning MuJoCo in the wheel
 would have made every PartCAD release a statement about which MuJoCo you get,

@@ -17,7 +17,7 @@
 # until 0.8.80. None of them should be: MuJoCo is somebody's program with a
 # release cycle of its own, MJCF is MuJoCo's, and pinning either in the wheel
 # would make every PartCAD release a statement about which MuJoCo you get.
-# PartCAD ships the *concept* -- the `simulate:` section, the sandbox wrapper,
+# PartCAD ships the *concept* -- the `qual: sim:` section, the sandbox wrapper,
 # the runner, the sections below -- and a package supplies the physics.
 #
 # `urdf` is the counter-example and stays in PartCAD's `//builtin/import`: a
@@ -33,8 +33,8 @@
 #
 # What is inside `before` and `after`, and anything else beside them, is this
 # plugin's own vocabulary. PartCAD does not read it: it hands the two objects to
-# the `validation:` expression of the `simulate:` that asked for the run, and
-# reports what the expression says.
+# the `validation:` expression of the `qual: sim:` entry that asked for the run,
+# and reports what the expression says.
 
 name: //pub/feature/simulate/mujoco
 desc: Reading, writing, opening and simulating a MuJoCo model, in MJCF.
@@ -100,15 +100,15 @@ docs:
     an MJCF model of the table it stands on is a scene. So it declares both, and
     the section a package puts it in is what it meant.
 
-    `pc sim` runs one under gravity and reports where everything ended up, so
-    that a part or an assembly can state what it is supposed to do -- or not do
-    -- and have that checked. `before` and `after` each carry `time` and a
-    `bodies` object: one entry per body, under PartCAD's name for it, holding
-    its position `pos` and its orientation `quat` (`w x y z`) in the world's
-    frame. Positions are in **millimetres**, PartCAD's
-    unit everywhere, not the metres MuJoCo works in -- a validation expression
-    is written by whoever wrote the part, against the numbers that part is
-    drawn in.
+    `pc qual test --simulation` runs one under gravity and reports where
+    everything ended up, so that a part or an assembly can state what it is
+    supposed to do -- or not do -- and have that checked. `before` and `after`
+    each carry `time` and a `bodies` object: one entry per body, under
+    PartCAD's name for it, holding its position `pos` and its orientation
+    `quat` (`w x y z`) in the world's frame. Positions are in **millimetres**,
+    PartCAD's unit everywhere, not the metres MuJoCo works in -- a validation
+    expression is written by whoever wrote the part, against the numbers that
+    part is drawn in.
 
     Beside `bodies`, each reading carries a `joints` object: one entry per
     PartCAD joint, under PartCAD's name for it however many MJCF joints it was
@@ -230,13 +230,13 @@ docs:
     for as long as the run lasts rather than coming to float. It acts at the
     body's centre of buoyancy, the centroid of what it displaces, so a body
     with its weight low down rights itself; the force is MuJoCo's `gravcomp`,
-    and the moment `pc sim` adds each step. Added mass and lift are not
-    modelled.
+    and the moment `pc qual test --simulation` adds each step. Added mass and
+    lift are not modelled.
 
     The gravity a run uses is, in order: `params: {gravity: ...}` on the
-    `simulate:`, the scene's, then MuJoCo's `[0, 0, -9.81]`. Neither the export
-    nor the simulation below states one of its own any more, because a default
-    there would beat every scene.
+    `qual: sim:` entry, the scene's, then MuJoCo's `[0, 0, -9.81]`. Neither the
+    export nor the simulation below states one of its own any more, because a
+    default there would beat every scene.
   usage: |
     Import this package and name it from the sections that use it:
 
@@ -255,20 +255,21 @@ docs:
     assemblies:
       stack:
         type: assy
-        simulate:
-          stands:
-            simulation: sim-mujoco:mujoco
-            offset: [[0, 0, 10], [0, 0, 1], 0]
-            validation: |
-              max(
-                  abs(after["bodies"][name]["pos"][2] - before["bodies"][name]["pos"][2])
-                  for name in before["bodies"]
-              ) < 2.0
+        qual:
+          sim:
+            stands:
+              path: sim-mujoco:mujoco
+              offset: [[0, 0, 10], [0, 0, 1], 0]
+              validation: |
+                max(
+                    abs(after["bodies"][name]["pos"][2] - before["bodies"][name]["pos"][2])
+                    for name in before["bodies"]
+                ) < 2.0
     ```
 
     ```shell
-    pc sim -a stack                          # run it and check the validation
-    pc sim --json -a stack                   # and print everything MuJoCo reported
+    pc qual test --simulation -a stack       # run it and check the validation
+    pc qual test --simulation --json -a stack # and print everything MuJoCo reported
     pc export -t sim-mujoco:mjcf -a stack    # write the model out
     pc ide open --with mujoco stack.xml      # and look at it
     ```
@@ -396,7 +397,7 @@ import:
       package puts it in is what it meant.
 
       Reading a model is not running one: this is XML and arithmetic, and no
-      MuJoCo installation is involved. Running it is `pc sim`.
+      MuJoCo installation is involved. Running it is `pc qual test --simulation`.
     path: import_mjcf.py
     extension: xml
     kinds: [assembly, scene]
@@ -485,7 +486,7 @@ simulation:
     # The gravity to run under, in m/s^2, over whatever the model says. No
     # default, for the reason the exporter above has none: the model already
     # carries the scene's gravity, and a default here would replace it in every
-    # run. A `simulate:` that wants another for one run says
+    # run. A `qual: sim:` entry that wants another for one run says
     # `params: {gravity: [0, 0, -1.62]}`, which beats the scene's.
     # gravity: [0.0, 0.0, -9.81]
     #
@@ -503,11 +504,12 @@ simulation:
     #
     # How long a run may take, in wall-clock seconds. Not stated here, so that
     # it is PartCAD's to work out: the larger of five minutes and ten seconds
-    # for each simulated one, unless a 'simulate:' says 'params: {timeout: ...}'
-    # (or the machine says 'simulation.timeout'). PartCAD hands the answer to the
-    # script as 'timeout' and stops the run when it is spent; MuJoCo runs far
-    # faster than real time, so a run that spends it has gone wrong, and the
-    # script stops itself a little before, saying how far it got.
+    # for each simulated one, unless a 'qual: sim:' entry says
+    # 'params: {timeout: ...}' (or the machine says 'simulation.timeout').
+    # PartCAD hands the answer to the script as 'timeout' and stops the run
+    # when it is spent; MuJoCo runs far faster than real time, so a run that
+    # spends it has gone wrong, and the script stops itself a little before,
+    # saying how far it got.
     # timeout: 300
     #
     # What a run may not be asked for, whatever it states: a 'duration' or a
