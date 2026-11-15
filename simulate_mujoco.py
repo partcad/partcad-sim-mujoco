@@ -1001,6 +1001,40 @@ def body_loads(mujoco, model, state, names=AS_WRITTEN, centres=()):
     return said
 
 
+# The most heights along a side a height field is drawn with in a snapshot: a
+# picture needs no more, and a field is sampled as finely as contact needs.
+SNAPSHOT_HFIELD_SAMPLES = 128
+
+
+def heightfield_triangles(model, field):
+    """A height field's surface as triangles in its geom's frame, as MuJoCo compiled it.
+
+    Its data's first row is its -Y edge and each row runs from -X to +X; a
+    height is the datum, between 0 and 1, times the field's third size. Only
+    the top is drawn, at most SNAPSHOT_HFIELD_SAMPLES heights a side: a snapshot
+    looks at a landscape from above it.
+    """
+    import numpy
+
+    nrow, ncol = int(model.hfield_nrow[field]), int(model.hfield_ncol[field])
+    half_x, half_y, rise, _base = (float(v) for v in model.hfield_size[field])
+    start = int(model.hfield_adr[field])
+    heights = numpy.asarray(model.hfield_data[start : start + nrow * ncol], dtype=float).reshape(nrow, ncol) * rise
+    step_row = max(1, int(numpy.ceil(nrow / float(SNAPSHOT_HFIELD_SAMPLES))))
+    step_col = max(1, int(numpy.ceil(ncol / float(SNAPSHOT_HFIELD_SAMPLES))))
+    rows = numpy.unique(numpy.append(numpy.arange(0, nrow, step_row), nrow - 1))
+    cols = numpy.unique(numpy.append(numpy.arange(0, ncol, step_col), ncol - 1))
+    ys = -half_y + 2.0 * half_y * rows / float(nrow - 1)
+    xs = -half_x + 2.0 * half_x * cols / float(ncol - 1)
+    grid_x, grid_y = numpy.meshgrid(xs, ys)
+    points = numpy.stack([grid_x, grid_y, heights[numpy.ix_(rows, cols)]], axis=-1)
+    a, b = points[:-1, :-1], points[:-1, 1:]
+    c, d = points[1:, 1:], points[1:, :-1]
+    return numpy.concatenate(
+        [numpy.stack([a, b, c], axis=-2).reshape(-1, 3, 3), numpy.stack([a, c, d], axis=-2).reshape(-1, 3, 3)]
+    )
+
+
 class Look:
     """What the scene looks like, read once out of the compiled model: every geom in its own frame.
 
@@ -1049,8 +1083,12 @@ class Look:
                 local = snapshot_raster.cylinder(size[0], size[1])
             elif kind == mujoco.mjtGeom.mjGEOM_CAPSULE:
                 local = snapshot_raster.capsule(size[0], size[1])
+            elif kind == mujoco.mjtGeom.mjGEOM_HFIELD:
+                # An elevation map PartCAD wrote as a height field (see
+                # 'export_mjcf.elevation_map'): its surface, as MuJoCo has it.
+                local = heightfield_triangles(model, model.geom_dataid[index])
             else:
-                # A height field or an SDF: nothing a scene PartCAD wrote holds.
+                # An SDF: nothing a scene PartCAD wrote holds.
                 continue
             # Turned outward where it is a closed surface, whose back need not
             # be drawn: half of what a frame costs.

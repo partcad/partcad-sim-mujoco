@@ -337,6 +337,15 @@ export:
     # 'static' says.
     light: true
     ground_plane: true
+    # An elevation map as MuJoCo's height field: a part whose geometry says it
+    # is one - a single solid, its top one B-spline face whose poles stand on a
+    # grid, its sides and base planes, as PartCAD's 'heightmap' and
+    # 'pointcloud' types build - is written as an '<hfield>' at most
+    # 'hfieldSamples' heights a side, which MuJoCo collides with as the surface
+    # it is. Every other part is a mesh, and a mesh collides as its convex
+    # hull, which fills a landscape's valleys. 'false' writes it as its mesh too.
+    hfield: true
+    hfieldSamples: 512
     # Write '<file>.names.json' beside the model: which MJCF name each PartCAD
     # body and joint became, and where each one is (PartCAD's
     # 'wrappers/naming.py'), and each MJCF joint's joint map -- which PartCAD
