@@ -165,15 +165,29 @@ def test_a_snapshot_draws_the_height_field_mujoco_compiled(tmp_path):
     assert triangles[..., 1].max() == pytest.approx((y1 - y0) / 2000.0)
     assert triangles[..., 2].min() == pytest.approx(0.0, abs=1e-9)
     assert triangles[..., 2].max() == pytest.approx(float(model.hfield_size[0][2]), rel=1e-6)
+    # And the right way round: a corner drawn where the hill and the slope put PartCAD's surface, which a
+    # mirror of the rows in X or in Y would move. The geom stands at the middle of the rectangle, at its
+    # lowest height.
+    gx, gy, gz = (float(v) * 1000.0 for v in model.geom_pos[0])
+    relief = float(numpy.max(poles) - numpy.min(poles))
+    for triangle in triangles[:: max(1, len(triangles) // 25)]:
+        px, py, pz = (float(v) * 1000.0 for v in triangle[0])
+        expected = heightfield.evaluate(poles, info["extent"], gx + px, gy + py)
+        assert gz + pz == pytest.approx(expected, abs=0.02 * relief), (px, py)
 
 
 # -- What is not one, however it looks -------------------------------------------------------------------------
 
 
 def test_without_occt_nothing_is_one(monkeypatch):
-    # The mocked shapes of the other tests, where OCCT is not installed.
-    monkeypatch.setitem(sys.modules, "OCP", None)
-    assert export_mjcf.elevation_map(object()) is None
+    # A real elevation map, so that only OCCT missing can make it None - as on
+    # a CI with the other tests' mocked shapes and no OCCT. Every OCP module
+    # this process has loaded is hidden, not only the package: a loaded one is
+    # found without its parent being asked.
+    shape, _, _ = built()
+    for name in [name for name in sys.modules if name == "OCP" or name.startswith("OCP.")]:
+        monkeypatch.setitem(sys.modules, name, None)
+    assert export_mjcf.elevation_map(shape) is None
 
 
 def test_a_hole_through_it_is_not_one():

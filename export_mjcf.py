@@ -614,6 +614,10 @@ def elevation_map(shape, samples=HFIELD_SAMPLES):
     # out: a hole through it, or an outline trimmed inside its bounds - which
     # the bounds, taken from its edges, do not show. It has one wire, and the
     # area of the whole patch.
+    x0, x1 = surface.Value(u0, v0).X(), surface.Value(u1, v0).X()
+    y0, y1 = surface.Value(u0, v0).Y(), surface.Value(u0, v1).Y()
+    if not (x1 > x0 and y1 > y0):
+        return None  # before a face is made of a patch with no extent, which OCCT refuses
     wires = TopExp_Explorer(face, TopAbs_WIRE)
     wires.Next()
     if wires.More():
@@ -625,10 +629,6 @@ def elevation_map(shape, samples=HFIELD_SAMPLES):
         BRepGProp.SurfaceProperties_s(patch, properties)
         areas.append(properties.Mass())
     if abs(areas[0] - areas[1]) > 1e-6 * areas[1]:
-        return None
-    x0, x1 = surface.Value(u0, v0).X(), surface.Value(u1, v0).X()
-    y0, y1 = surface.Value(u0, v0).Y(), surface.Value(u0, v1).Y()
-    if not (x1 > x0 and y1 > y0):
         return None
     # X and Y linear in the parameters, so that a height is read over the plan
     # without solving for anything - and exactly so, not at a few probes: a
