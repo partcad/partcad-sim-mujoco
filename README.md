@@ -628,6 +628,13 @@ one. The field is sampled at the surface's poles, at most `hfieldSamples` (512)
 heights a side, and placed where the part is; `hfield: false` writes the mesh
 instead. A snapshot of a run draws it as MuJoCo compiled it.
 
+A height field is written for MuJoCo, and is not read back: this package's
+importer reads meshes and MuJoCo's primitives into parts, and an `<hfield>` is
+neither, so it is dropped with a warning saying so (and a model of nothing else
+is refused, as one with no geometry). To export a landscape that
+is to be imported again - a round trip - export it with `hfield: false`, and it
+is read back as the mesh it was written as.
+
 Every part is still a solid in PartCAD - the same box with the surface on top is
 what is rendered, exported and checked for overlaps - and the height field is
 what this exporter makes of it for MuJoCo alone.

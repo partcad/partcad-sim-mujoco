@@ -239,3 +239,26 @@ def test_a_ground_that_moves_keeps_its_mesh(tmp_path):
     assert not model.find("asset").findall("hfield") and model.find("asset").findall("mesh")
     assert any("moves" in warning for warning in result["warnings"])
     assert all(os.path.isfile(os.path.join(str(tmp_path), name)) for name in result["files"])
+
+
+# -- Reading it back ----------------------------------------------------------------------------------------------
+
+
+def test_a_landscape_to_be_read_back_is_exported_as_its_mesh(tmp_path):
+    """A height field is for MuJoCo and is not read back (see the README): 'hfield: false' is the round trip."""
+    import import_mjcf
+
+    shape, _, _ = built()
+    as_field, as_mesh = tmp_path / "field" / "site.xml", tmp_path / "mesh" / "site.xml"
+    for path, hfield in ((as_field, True), (as_mesh, False)):
+        path.parent.mkdir()
+        result = export_mjcf.process(str(path), {"shape_tree": scene_of(shape), "wrapped": object(), "hfield": hfield})
+        assert result["success"], result
+
+    back = import_mjcf.process(None, {"source_file": str(as_mesh), "output_folder": str(tmp_path / "mesh")})
+    parts = [link for link in back["root"]["links"] if link.get("type") == "part"]
+    assert len(parts) == 1 and parts[0]["part_file"].endswith(".stl") and os.path.isfile(parts[0]["part_file"])
+
+    # The height field is not read back, and a model of nothing else is no model to import.
+    with pytest.raises(ValueError, match="No geometry found"):
+        import_mjcf.process(None, {"source_file": str(as_field), "output_folder": str(tmp_path / "field")})
