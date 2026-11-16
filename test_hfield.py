@@ -165,3 +165,63 @@ def test_a_snapshot_draws_the_height_field_mujoco_compiled(tmp_path):
     assert triangles[..., 1].max() == pytest.approx((y1 - y0) / 2000.0)
     assert triangles[..., 2].min() == pytest.approx(0.0, abs=1e-9)
     assert triangles[..., 2].max() == pytest.approx(float(model.hfield_size[0][2]), rel=1e-6)
+
+
+# -- What is not one, however it looks -------------------------------------------------------------------------
+
+
+def test_without_occt_nothing_is_one(monkeypatch):
+    # The mocked shapes of the other tests, where OCCT is not installed.
+    monkeypatch.setitem(sys.modules, "OCP", None)
+    assert export_mjcf.elevation_map(object()) is None
+
+
+def test_a_hole_through_it_is_not_one():
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.gp import gp_Pnt
+
+    shape, info, _ = built()
+    x0, y0, x1, y1 = info["extent"]
+    # A shaft through the middle: the top's bounds are the same, and it is not the whole surface.
+    shaft = BRepPrimAPI_MakeBox(gp_Pnt((x0 + x1) / 2 - 500.0, (y0 + y1) / 2 - 500.0, -1000.0), 1000.0, 1000.0, 20000.0)
+    holed = BRepAlgoAPI_Cut(shape, shaft.Shape()).Shape()
+    assert export_mjcf.elevation_map(shape) is not None
+    assert export_mjcf.elevation_map(holed) is None
+
+
+def test_a_coordinate_is_linear_where_the_poles_are_at_their_greville_places():
+    knots = [0.0] * 4 + [0.25, 0.5, 0.75] + [1.0] * 4
+    places = export_mjcf.greville(knots, 3)
+    assert places == pytest.approx([0.0, 1 / 12.0, 0.25, 0.5, 0.75, 11 / 12.0, 1.0])
+    assert export_mjcf.linear_in_parameter([100.0 + 1200.0 * g for g in places], knots, 3, 100.0, 1300.0)
+    # Evenly spaced poles of a cubic: the same at both ends and at every knot's middle, and bent between.
+    even = [100.0 + 1200.0 * k / 6.0 for k in range(7)]
+    assert not export_mjcf.linear_in_parameter(even, knots, 3, 100.0, 1300.0)
+    # A degree-1 surface's poles stand at its knots: at a quarter, a pole a quarter of the way along, or a bend.
+    knots = [0.0, 0.0, 0.25, 1.0, 1.0]
+    assert export_mjcf.linear_in_parameter([0.0, 10.0, 40.0], knots, 1, 0.0, 40.0)
+    assert not export_mjcf.linear_in_parameter([0.0, 20.0, 40.0], knots, 1, 0.0, 40.0)
+
+
+def test_what_an_export_says_it_wrote_is_there(tmp_path):
+    shape, _, _ = built()
+    path = tmp_path / "site.xml"
+    result = export_mjcf.process(str(path), {"shape_tree": scene_of(shape), "wrapped": object()})
+    assert result["success"], result
+    # A height field is written inline: it is no mesh file, and nothing says it is.
+    assert result["meshes"] == []
+    assert all(os.path.isfile(os.path.join(str(tmp_path), name)) for name in result["files"]), result["files"]
+    assert not any("Nothing was exported" in warning for warning in result["warnings"])
+
+
+def test_a_ground_that_moves_keeps_its_mesh(tmp_path):
+    shape, _, _ = built()
+    path = tmp_path / "site.xml"
+    result = export_mjcf.process(str(path), {"shape_tree": scene_of(shape), "wrapped": object(), "static": False})
+    assert result["success"], result
+    model = ElementTree.parse(str(path)).getroot()
+    # Free to fall, it would fall through the ground as a height field: it is its mesh, and said to be.
+    assert not model.find("asset").findall("hfield") and model.find("asset").findall("mesh")
+    assert any("moves" in warning for warning in result["warnings"])
+    assert all(os.path.isfile(os.path.join(str(tmp_path), name)) for name in result["files"])
