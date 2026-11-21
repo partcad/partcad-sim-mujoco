@@ -524,6 +524,213 @@ def write_centres_of_buoyancy(mujoco, state):
         numeric.set("data", mujoco_common.format_numbers(centre))
 
 
+# -- Elevation maps -------------------------------------------------------------------------------------------
+#
+# A part that is definitely an elevation map is written as MuJoCo's height
+# field, the one case where a part is not its mesh: MuJoCo collides with a mesh
+# as its convex hull, which fills every valley of a landscape, and with a height
+# field as the surface it is. Definitely means by its geometry, whatever made it
+# (PartCAD's 'heightmap' and 'pointcloud' types make exactly this): one solid,
+# its top a single non-rational B-spline face whose poles stand on a grid - X
+# the same down every column of poles, Y along every row - with X and Y linear in
+# the surface's parameters, so that it is a height over the plan and nothing
+# else; and every other face a plane, its base flat and lowest. Anything less
+# certain is a mesh, as before.
+
+# The most heights along a side the field is sampled at: past it, the poles are
+# finer than any contact needs, and the model's XML grows by a number a sample.
+HFIELD_SAMPLES = 512
+
+# How far, in mm, a pole may stray off its grid line, or the surface off a
+# straight line in its parameters, and the part still be an elevation map.
+HFIELD_TOLERANCE = 1e-3
+
+
+def elevation_map(shape, samples=HFIELD_SAMPLES):
+    """'{"extent", "lowest", "base", "heights"}' of a part that is an elevation map, or None.
+
+    'extent' is the rectangle it stands on (x0, y0, x1, y1) and 'heights[i][j]'
+    the top's height at column i (along X) and row j (along Y), sampled evenly
+    from edge to edge, both in the part's own frame, in mm; 'lowest' is the
+    lowest of them and 'base' the height of the flat base.
+    """
+    try:
+        from OCP.BRep import BRep_Tool
+        from OCP.BRepAdaptor import BRepAdaptor_Surface
+        from OCP.BRepBndLib import BRepBndLib
+        from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace
+        from OCP.BRepGProp import BRepGProp
+        from OCP.Bnd import Bnd_Box
+        from OCP.BRepTools import BRepTools
+        from OCP.GeomAbs import GeomAbs_BSplineSurface, GeomAbs_Plane
+        from OCP.GProp import GProp_GProps
+        from OCP.TopAbs import TopAbs_FACE, TopAbs_SOLID, TopAbs_WIRE
+        from OCP.TopExp import TopExp_Explorer
+        from OCP.TopoDS import TopoDS, TopoDS_Shape
+    except ImportError:
+        # No OCCT to measure it with - which in PartCAD's sandbox never
+        # happens - and so nothing is known to be an elevation map.
+        return None
+
+    if not isinstance(shape, TopoDS_Shape) or shape.IsNull():
+        return None
+    solids = TopExp_Explorer(shape, TopAbs_SOLID)
+    if not solids.More():
+        return None
+    solids.Next()
+    if solids.More():
+        return None
+    top, planes = None, []
+    faces = TopExp_Explorer(shape, TopAbs_FACE)
+    while faces.More():
+        face = TopoDS.Face_s(faces.Current())
+        adaptor = BRepAdaptor_Surface(face)
+        kind = adaptor.GetType()
+        if kind == GeomAbs_Plane:
+            planes.append(adaptor.Plane())
+        elif kind == GeomAbs_BSplineSurface and top is None:
+            top = (face, adaptor.BSpline())
+        else:
+            return None
+        faces.Next()
+    if top is None or len(planes) < 2:
+        return None
+    face, surface = top
+    if surface.IsURational() or surface.IsVRational():
+        return None
+    nu, nv = surface.NbUPoles(), surface.NbVPoles()
+    xs = [surface.Pole(i, 1).X() for i in range(1, nu + 1)]
+    ys = [surface.Pole(1, j).Y() for j in range(1, nv + 1)]
+    for i in range(1, nu + 1):
+        for j in range(1, nv + 1):
+            pole = surface.Pole(i, j)
+            if abs(pole.X() - xs[i - 1]) > HFIELD_TOLERANCE or abs(pole.Y() - ys[j - 1]) > HFIELD_TOLERANCE:
+                return None
+    u0, u1, v0, v1 = surface.Bounds()
+    face_bounds = BRepTools.UVBounds_s(face)
+    if any(abs(a - b) > 1e-9 * max(1.0, abs(b)) for a, b in zip(face_bounds, (u0, u1, v0, v1))):
+        return None  # a trimmed face is less than the whole surface
+    # Nor is one whose bounds are the surface's but which leaves some of it
+    # out: a hole through it, or an outline trimmed inside its bounds - which
+    # the bounds, taken from its edges, do not show. It has one wire, and the
+    # area of the whole patch.
+    x0, x1 = surface.Value(u0, v0).X(), surface.Value(u1, v0).X()
+    y0, y1 = surface.Value(u0, v0).Y(), surface.Value(u0, v1).Y()
+    if not (x1 > x0 and y1 > y0):
+        return None  # before a face is made of a patch with no extent, which OCCT refuses
+    wires = TopExp_Explorer(face, TopAbs_WIRE)
+    wires.Next()
+    if wires.More():
+        return None
+    whole = BRepBuilderAPI_MakeFace(BRep_Tool.Surface_s(face), u0, u1, v0, v1, 1e-7).Face()
+    areas = []
+    for patch in (face, whole):
+        properties = GProp_GProps()
+        BRepGProp.SurfaceProperties_s(patch, properties)
+        areas.append(properties.Mass())
+    if abs(areas[0] - areas[1]) > 1e-6 * areas[1]:
+        return None
+    # X and Y linear in the parameters, so that a height is read over the plan
+    # without solving for anything - and exactly so, not at a few probes: a
+    # B-spline is a linear function of its parameter exactly where its poles
+    # stand at the Greville abscissae of its knots (linear precision), whatever
+    # its degree.
+    if not linear_in_parameter(xs, knots_of(surface.UKnotSequence()), surface.UDegree(), x0, x1):
+        return None
+    if not linear_in_parameter(ys, knots_of(surface.VKnotSequence()), surface.VDegree(), y0, y1):
+        return None
+    box = Bnd_Box()
+    BRepBndLib.AddOptimal_s(shape, box, False, False)
+    bx0, by0, bz0, bx1, by1, _ = box.Get()
+    if max(abs(bx0 - x0), abs(bx1 - x1), abs(by0 - y0), abs(by1 - y1)) > 1e-2:
+        return None
+    # Every plane a side standing on the rectangle, or the flat base under it all.
+    base = None
+    for plane in planes:
+        normal = plane.Axis().Direction()
+        if abs(normal.Z()) < 1e-6:
+            continue
+        if abs(abs(normal.Z()) - 1.0) > 1e-6 or base is not None:
+            return None
+        base = plane.Location().Z()
+    if base is None or abs(base - bz0) > 1e-2:
+        return None
+    ncol = max(2, min(int(samples), max(nu, 2)))
+    nrow = max(2, min(int(samples), max(nv, 2)))
+    heights = [
+        [surface.Value(u0 + (u1 - u0) * i / (ncol - 1), v0 + (v1 - v0) * j / (nrow - 1)).Z() for j in range(nrow)]
+        for i in range(ncol)
+    ]
+    lowest = min(min(column) for column in heights)
+    return {"extent": (x0, y0, x1, y1), "lowest": lowest, "base": base, "heights": heights}
+
+
+def knots_of(sequence):
+    """An OCCT array of flat knots (each repeated by its multiplicity) as a list."""
+    return [sequence.Value(k) for k in range(sequence.Lower(), sequence.Upper() + 1)]
+
+
+def greville(knots, degree):
+    """The Greville abscissae of a B-spline's poles: each the mean of the 'degree' knots after its own."""
+    count = len(knots) - degree - 1
+    return [sum(knots[i + 1 : i + 1 + degree]) / float(degree) for i in range(count)]
+
+
+def linear_in_parameter(values, knots, degree, low, high):
+    """Whether poles 'values' make a coordinate that runs linearly from 'low' to 'high' over the knots' range."""
+    places = greville(knots, degree)
+    if len(places) != len(values) or degree < 1:
+        return False
+    start, end = knots[0], knots[-1]
+    return all(
+        abs(value - (low + (high - low) * (place - start) / (end - start))) <= HFIELD_TOLERANCE
+        for value, place in zip(values, places)
+    )
+
+
+def hfield_asset(field, node, body_name, state):
+    """Write an elevation map as an ``<asset><hfield>`` (or reuse one) and return its name.
+
+    MuJoCo's height field is its rectangle's half sides, the rise of its
+    surface over its lowest point, and the depth of its base under that, in
+    metres; its heights are given inline, normalised by MuJoCo, row by row from
+    the +Y edge to the -Y edge, each from -X to +X.
+    """
+    # Kept apart from the meshes, which are files: a height field is written
+    # inline, and has none.
+    key = node.get(ocp_serialize.KEY_BREP)
+    asset_name = state["hfields"].get(key)
+    if asset_name is not None:
+        return asset_name
+    asset_name = state["mesh_names"].derive(node.get("label") or body_name, "hfield")
+    x0, y0, x1, y1 = field["extent"]
+    heights = field["heights"]
+    ncol, nrow = len(heights), len(heights[0])
+    lowest = field["lowest"]
+    rise = max(max(column) for column in heights) - lowest
+    depth = lowest - field["base"]
+    mm = mujoco_common.MM_PER_M
+    hfield = ElementTree.SubElement(state["asset"], "hfield")
+    hfield.set("name", asset_name)
+    hfield.set("nrow", str(nrow))
+    hfield.set("ncol", str(ncol))
+    hfield.set(
+        "size",
+        mujoco_common.format_numbers(
+            [(x1 - x0) / 2.0 / mm, (y1 - y0) / 2.0 / mm, max(rise, 1e-3) / mm, max(depth, 1e-3) / mm], 9
+        ),
+    )
+    hfield.set(
+        "elevation",
+        " ".join(
+            mujoco_common.format_numbers([(heights[i][j] - lowest) / mm for i in range(ncol)], 7)
+            for j in reversed(range(nrow))
+        ),
+    )
+    state["hfields"][key] = asset_name
+    return asset_name
+
+
 def mesh_asset(shape, node, body_name, state):
     """Write 'shape' out as a mesh (or reuse one) and return the asset's name.
 
@@ -623,7 +830,7 @@ def physics_of(node, state):
     return (kinematics.properties_of(state["properties"], node) or {}).get("physics") or {}
 
 
-def emit_geom(body, part, pose, asset_name, physics, weighed, state, index):
+def emit_geom(body, part, pose, asset_name, physics, weighed, state, index, kind="mesh"):
     """Add one ``<geom>`` to a body, with what its part says about itself.
 
     'pose' is where the part sits in the body. 'physics' is what decides how
@@ -640,8 +847,8 @@ def emit_geom(body, part, pose, asset_name, physics, weighed, state, index):
     """
     geom = ElementTree.SubElement(body, "geom")
     geom.set("name", state["geom_names"].derive("%s_geom_%d" % (body.get("name"), index), "geom"))
-    geom.set("type", "mesh")
-    geom.set("mesh", asset_name)
+    geom.set("type", kind)
+    geom.set(kind, asset_name)
     if not urdf_common.is_identity(pose):
         geom.set("pos", mujoco_common.format_pos(pose))
         geom.set("quat", mujoco_common.format_quat(pose))
@@ -728,12 +935,35 @@ def emit_body(parent, body, pose, state):
     return element, own, shapes, inertial
 
 
-def emit_geoms(element, own, shapes, inertial, body, state):
-    """Write a body's geoms, and the buoyancy of what they displace."""
+def emit_geoms(element, own, shapes, inertial, body, state, moves=False):
+    """Write a body's geoms, and the buoyancy of what they displace.
+
+    A part that is an elevation map (see 'elevation_map') is a height field,
+    which MuJoCo collides with as the surface it is; every other part is a
+    mesh, which MuJoCo collides with as its convex hull. A body that 'moves' -
+    a joint of its own or of a body it is in - keeps its mesh: MuJoCo collides a
+    height field with no plane, so one that fell would fall through the ground.
+    """
     for index, part, shape in shapes:
-        asset_name = mesh_asset(shape, part.node, element.get("name"), state)
         physics = dict(own)
         physics.update(part.physics)
+        field = elevation_map(shape, state["options"]["hfieldSamples"]) if state["options"]["hfield"] else None
+        if field is not None and moves:
+            state["warnings"].append(
+                "'%s' is an elevation map in a body that moves, and MuJoCo collides a height field with no plane: it "
+                "is written as a mesh. Fix it in place ('fixed: true', or 'static') to have its height field"
+                % (part.node.get("label") or element.get("name"))
+            )
+            field = None
+        if field is not None:
+            asset_name = hfield_asset(field, part.node, element.get("name"), state)
+            # The height field's frame: the middle of its rectangle, at its lowest height.
+            x0, y0, x1, y1 = field["extent"]
+            offset = ((1.0, 0.0, 0.0, 0.0), ((x0 + x1) / 2.0, (y0 + y1) / 2.0, field["lowest"]))
+            pose = urdf_common.compose(part.placement, offset)
+            emit_geom(element, part, pose, asset_name, physics, inertial is not None, state, index, kind="hfield")
+            continue
+        asset_name = mesh_asset(shape, part.node, element.get("name"), state)
         emit_geom(element, part, part.placement, asset_name, physics, inertial is not None, state, index)
     if shapes:
         write_buoyancy(element, inertial, shape_pairs(body), state)
@@ -1240,7 +1470,11 @@ def write_excludes(mujoco, state):
 def emit_bodies(worldbody, found, state):
     """Write every body 'kinematics' found, nested along its parents, with its joint."""
     elements = {}
+    # Whether each body moves: a joint of its own, or a body it is nested in
+    # that does (see 'emit_geoms').
+    moving = {}
     for body in found:
+        nested = isinstance(body.parent, kinematics.Body)
         if isinstance(body.parent, kinematics.Body):
             parent = elements.get(id(body.parent))
             if parent is None:
@@ -1273,7 +1507,10 @@ def emit_bodies(worldbody, found, state):
             ElementTree.SubElement(element, "freejoint")
         # A body welded to the world -- a 'fixed' scene element, or any root
         # under 'static' -- gets no joint: in MJCF that is what welded means.
-        emit_geoms(element, own, shapes, inertial, body, state)
+        moves = any(child.tag in ("joint", "freejoint") for child in element)
+        moves = moves or (nested and moving.get(id(body.parent), False))
+        moving[id(body)] = moves
+        emit_geoms(element, own, shapes, inertial, body, state, moves)
 
 
 def add_ground_plane(worldbody, state):
@@ -1409,6 +1646,7 @@ def process(path, request):
         # 'write_names'.
         "body_parts": {},
         "meshes": {},
+        "hfields": {},
         "mesh_dir": mesh_dir,
         "mesh_dir_name": mesh_dir_name,
         # Shape full name -> the properties its part declares ('physics',
@@ -1439,6 +1677,10 @@ def process(path, request):
             "angularTolerance": request.get("angularTolerance", 0.1),
             "ascii": request.get("ascii", False),
             "static": request.get("static", True),
+            # An elevation map as MuJoCo's height field rather than its mesh
+            # (see 'elevation_map'), sampled at most this many heights a side.
+            "hfield": request.get("hfield", True),
+            "hfieldSamples": int(request.get("hfieldSamples", HFIELD_SAMPLES)),
         },
         "warnings": warnings,
     }
@@ -1464,7 +1706,7 @@ def process(path, request):
     write_centres_of_buoyancy(mujoco, state)
     write_keyframe(mujoco, worldbody, state)
 
-    if not state["meshes"]:
+    if not state["meshes"] and not state["hfields"]:
         warnings.append("Nothing was exported: the object holds no geometry MJCF can reference")
 
     renamed = naming.renamed_warning(MJCF_NAMES, state["body_names"], state["joint_names"])

@@ -609,6 +609,36 @@ integrates the mesh at it.
 It needs the PartCAD that does this, and says so: `partcad:` in `partcad.yaml`
 makes an older one refuse the package.
 
+## Landscapes: an elevation map is a height field
+
+MuJoCo collides with a mesh as its convex hull. That is right for most parts and
+wrong for a landscape: the hull of a valley is the valley filled in, and
+whatever is dropped into it lands on air. So a part that is definitely an
+elevation map is written as MuJoCo's own `<hfield>`, which it collides with as
+the surface it is.
+
+Definitely means by its geometry, whatever made it: one solid whose top is a
+single B-spline face with its poles on a grid - X the same down every column of
+them, Y along every row, and both linear in the surface's parameters, so that it
+is a height over the plan and nothing else - and whose other faces are planes,
+its base flat and lowest. PartCAD's `heightmap` and `pointcloud` part types build
+exactly that: a box below, the measured surface on top. Anything less certain is
+a mesh, as before, and a part that is not an elevation map is never written as
+one. The field is sampled at the surface's poles, at most `hfieldSamples` (512)
+heights a side, and placed where the part is; `hfield: false` writes the mesh
+instead. A snapshot of a run draws it as MuJoCo compiled it.
+
+A height field is written for MuJoCo, and is not read back: this package's
+importer reads meshes and MuJoCo's primitives into parts, and an `<hfield>` is
+neither, so it is dropped with a warning saying so (and a model of nothing else
+is refused, as one with no geometry). To export a landscape that
+is to be imported again - a round trip - export it with `hfield: false`, and it
+is read back as the mesh it was written as.
+
+Every part is still a solid in PartCAD - the same box with the surface on top is
+what is rendered, exported and checked for overlaps - and the height field is
+what this exporter makes of it for MuJoCo alone.
+
 ## Gravity, and the fluid a scene is filled with
 
 A PartCAD scene may say what its world is like, beside where things are in it:
